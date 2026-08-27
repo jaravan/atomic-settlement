@@ -48,8 +48,8 @@
   <text class="eyebrow" x="48" y="62">ATOMIC DELIVERY VERSUS PAYMENT &#183; PERMISSIONED EVM</text>
   <text class="lede"    x="48" y="110">One transaction moves the asset and the cash &#8212; or neither moves.</text>
 
-  <rect class="badge-box" x="878" y="40" width="274" height="52" rx="26"/>
-  <text class="badge"    x="1015" y="73">no escrow &#183; no custody</text>
+  <rect class="badge-box" x="878" y="22" width="274" height="52" rx="26"/>
+  <text class="badge"    x="1015" y="55">no escrow &#183; no custody</text>
 
   <!-- ══ bank A ══ -->
   <rect class="panel" x="48" y="160" width="280" height="240" rx="14"/>
