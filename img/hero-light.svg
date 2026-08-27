@@ -1,0 +1,102 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 600" width="1200" height="600" role="img"
+     aria-label="Atomic delivery versus payment: Bank A sends 1,000,000 TokenizedCash and Bank B sends 100 AssetToken through DvPSettlement.settle in a single transaction, both legs or neither, with every party checked against the upgradeable-kyc-registry.">
+  <style>
+    :root { }
+    .bg      { fill: #ffffff; }
+    .panel   { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1.5; }
+    .pill    { fill: #ffffff; stroke: #d0d7de; stroke-width: 1; }
+    text     { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    .mono, .mono-lg { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+
+    .eyebrow    { fill: #59636e; font-size: 17px; font-weight: 700; letter-spacing: 3.2px; }
+    .lede       { fill: #1f2328;  font-size: 31px; font-weight: 600; letter-spacing: -0.4px; }
+    .badge-box  { fill: none; stroke: #8250df; stroke-width: 1.5; }
+    .badge      { fill: #8250df; font-size: 17px; font-weight: 600; text-anchor: middle; }
+
+    .node-title { fill: #1f2328;  font-size: 27px; font-weight: 650; text-anchor: middle; }
+    .node-sub   { fill: #59636e; font-size: 17px; text-anchor: middle; }
+    .node-meta  { fill: #59636e; font-size: 14px; text-anchor: middle; letter-spacing: 0.3px; }
+
+    .settle-box   { fill: #f6f8fa; stroke: #8250df; stroke-width: 2; }
+    .settle-title { fill: #8250df; font-size: 25px; font-weight: 700; text-anchor: middle; }
+    .mono-lg      { fill: #1f2328; font-size: 19px; text-anchor: middle; }
+    .thesis       { fill: #8250df; font-size: 16px; font-weight: 600; text-anchor: middle; letter-spacing: 0.2px; }
+
+    .leg-cash  { stroke: #0969da;  stroke-width: 2.5; }
+    .leg-asset { stroke: #1a7f37; stroke-width: 2.5; }
+    .lbl-cash  { fill: #0969da;  font-size: 16px; font-weight: 600; text-anchor: middle; }
+    .lbl-asset { fill: #1a7f37; font-size: 16px; font-weight: 600; text-anchor: middle; }
+    .fill-cash  { fill: #0969da; }
+    .fill-asset { fill: #1a7f37; }
+
+    .tie       { stroke: #d0d7de; stroke-width: 1.5; stroke-dasharray: 3 7; stroke-linecap: round; }
+    .reg-title { fill: #1f2328;  font-size: 21px; font-weight: 650; }
+    .reg-sub   { fill: #59636e; font-size: 15px; }
+    .pill-t    { fill: #59636e; font-size: 15px; font-weight: 600; text-anchor: middle; }
+  </style>
+  <defs>
+    <marker id="head-cash" viewBox="0 0 10 10" refX="9.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="fill-cash"/>
+    </marker>
+    <marker id="head-asset" viewBox="0 0 10 10" refX="9.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" class="fill-asset"/>
+    </marker>
+  </defs>
+  <rect class="bg" x="0" y="0" width="1200" height="600"/>
+
+  <!-- ══ header ══ -->
+  <text class="eyebrow" x="48" y="62">ATOMIC DELIVERY VERSUS PAYMENT &#183; PERMISSIONED EVM</text>
+  <text class="lede"    x="48" y="110">One transaction moves the asset and the cash &#8212; or neither moves.</text>
+
+  <rect class="badge-box" x="878" y="40" width="274" height="52" rx="26"/>
+  <text class="badge"    x="1015" y="73">no escrow &#183; no custody</text>
+
+  <!-- ══ bank A ══ -->
+  <rect class="panel" x="48" y="160" width="280" height="240" rx="14"/>
+  <text class="node-title" x="188" y="262">Bank A</text>
+  <text class="node-sub"   x="188" y="292">buyer</text>
+  <text class="node-meta"  x="188" y="320">approved &#183; not frozen</text>
+
+  <!-- ══ settlement ══ -->
+  <rect class="settle-box" x="470" y="160" width="260" height="240" rx="14"/>
+  <text class="settle-title" x="600" y="196">DvPSettlement</text>
+  <text class="mono-lg"   x="600" y="288">settle(tradeId)</text>
+  <text class="thesis"    x="600" y="320">both legs, or neither</text>
+
+  <!-- ══ bank B ══ -->
+  <rect class="panel" x="872" y="160" width="280" height="240" rx="14"/>
+  <text class="node-title" x="1012" y="262">Bank B</text>
+  <text class="node-sub"   x="1012" y="292">seller</text>
+  <text class="node-meta"  x="1012" y="320">approved &#183; not frozen</text>
+
+  <!-- ══ cash leg : A -> settlement -> B ══ -->
+  <line class="leg-cash" x1="336" y1="220" x2="460" y2="220" marker-end="url(#head-cash)"/>
+  <line class="leg-cash" x1="740" y1="220" x2="864" y2="220" marker-end="url(#head-cash)"/>
+  <text class="lbl-cash"      x="398" y="206">TokenizedCash</text>
+  <text class="lbl-cash mono" x="802" y="206">1,000,000</text>
+
+  <!-- ══ asset leg : B -> settlement -> A ══ -->
+  <line class="leg-asset" x1="864" y1="340" x2="740" y2="340" marker-end="url(#head-asset)"/>
+  <line class="leg-asset" x1="460" y1="340" x2="336" y2="340" marker-end="url(#head-asset)"/>
+  <text class="lbl-asset"      x="802" y="326">AssetToken</text>
+  <text class="lbl-asset mono" x="398" y="326">100</text>
+
+  <!-- ══ registry links ══ -->
+  <line class="tie" x1="188"  y1="400" x2="188"  y2="490"/>
+  <line class="tie" x1="600"  y1="400" x2="600"  y2="490"/>
+  <line class="tie" x1="1012" y1="400" x2="1012" y2="490"/>
+
+  <!-- ══ registry ══ -->
+  <rect class="panel" x="48" y="490" width="1104" height="80" rx="14"/>
+  <text class="reg-title" x="78" y="524">upgradeable-kyc-registry</text>
+  <text class="reg-sub"   x="78" y="551">pinned submodule &#183; enforced by the tokens, on every transfer</text>
+
+  <rect class="pill" x="648" y="515" width="98"  height="30" rx="15"/>
+  <text class="pill-t" x="697"  y="535">approved</text>
+  <rect class="pill" x="758" y="515" width="100" height="30" rx="15"/>
+  <text class="pill-t" x="808"  y="535">tier limit</text>
+  <rect class="pill" x="870" y="515" width="106" height="30" rx="15"/>
+  <text class="pill-t" x="923"  y="535">not frozen</text>
+  <rect class="pill" x="988" y="515" width="136" height="30" rx="15"/>
+  <text class="pill-t" x="1056" y="535">not sanctioned</text>
+</svg>
