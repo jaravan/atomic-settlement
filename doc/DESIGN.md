@@ -20,7 +20,7 @@ separate repository consumed as a pinned submodule.
 Design notes per contract:
 
 - [Tokenized Cash](design-cash.md) — the cash leg
-- `design-asset.md` — the asset leg (with `AssetToken`)
+- [Asset Token](design-asset.md) — the asset leg
 - `design-settlement.md` — settlement lifecycle (with `DvPSettlement`)
 
 ### The problem

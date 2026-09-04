@@ -67,7 +67,7 @@ Two properties fall out of this shape, and both are requirements rather than pre
 
 - [Design](doc/DESIGN.md) — scope, the DvP mechanism, how the three contracts fit together
 - [Tokenized Cash](doc/design-cash.md) — the cash leg, in full
-- `doc/design-asset.md` — the asset leg _(next)_
+- [Asset Token](doc/design-asset.md) — the asset leg, in full
 - `doc/design-settlement.md` — settlement lifecycle _(next)_
 
 ## Status
