@@ -21,7 +21,7 @@ Design notes per contract:
 
 - [Tokenized Cash](design-cash.md) — the cash leg
 - [Asset Token](design-asset.md) — the asset leg
-- `design-settlement.md` — settlement lifecycle (with `DvPSettlement`)
+- [Settlement](design-settlement.md) — the contract that moves both legs
 
 ### The problem
 
@@ -118,12 +118,12 @@ Bank B  ──approve(settlement, 100 bonds)──▶  AssetToken       ← asse
 rather than a preference. An escrowing contract takes custody first: the cash moves into
 it, making it the `to` of a transfer, and `to` must be `isApproved` — which a contract can
 never be, so the funding call would always revert. The spender exemption in
-[section 3](design-cash.md#3-who-gets-checked-on-a-transfer) relaxes `isApproved` for
+[cash section 3](design-cash.md#3-who-gets-checked-on-a-transfer) relaxes `isApproved` for
 `msg.sender` only; widening it to recipients would mean whitelisting contract addresses,
-exactly what [section 1](design-cash.md#1-compliance-state-lives-in-the-registry-not-the-token)
+exactly what [cash section 1](design-cash.md#1-compliance-state-lives-in-the-registry-not-the-token)
 rejects. `DvPSettlement` therefore moves cash directly from payer to payee and never takes
-custody of either leg, and any other settlement contract built against the cash token must
-do the same.
+custody of either leg, and any other settlement contract built against either token must do
+the same.
 
 ### Two ways the cash moves
 
@@ -156,25 +156,42 @@ Nothing else is relaxed:
 - The two banks are still checked in full, as `from` and `to`
 - Only the contract in the middle is exempt, and only from `isApproved`
 
-[Section 3](design-cash.md#3-who-gets-checked-on-a-transfer) gives the exact rule.
+[Cash section 3](design-cash.md#3-who-gets-checked-on-a-transfer) gives the exact rule, and
+[asset section 3](design-asset.md#3-who-gets-checked-on-a-transfer) is identical. The
+exemption is a property of the system, not of the cash leg.
 
 ---
 
 ## How the three fit together
 
 **The dependency runs one way.** `DvPSettlement` depends on both tokens; both tokens depend
-on the registry; never the reverse. Each layer is upgradeable in inverse proportion to how
-stable its subject matter is — compliance rules evolve, settlement workflows evolve, a unit
-of currency does not.
+on the registry; never the reverse.
 
-**Compliance is enforced by the cash token, not by the settlement contract.** `settle()`
-calls `transferFrom` and the token checks the registry itself: approval and tier on both
-parties, freeze on the payer, sanctions on the settlement contract as the spender. So the
-checks happen at settlement time rather than only at account opening. Re-implementing them
-in the settlement contract would create a second source of truth that drifts from the
-first, and the settlement path is precisely where that drift would go unnoticed. The
-settlement contract stays token-agnostic and lets the cash leg refuse.
+**Only the registry is upgradeable.** Compliance rules evolve, so it is UUPS-upgradeable and
+separately governed. Nothing else is. A unit of currency does not change, the terms of a
+bond change less still, and settlement workflows do evolve but the contract that runs them
+holds no balances, so replacing it is a redeployment rather than a migration
+([settlement section 9](design-settlement.md#9-not-upgradeable)).
+
+**Compliance is enforced by the tokens, not by the settlement contract.** `settle()` calls
+`transferFrom` and each token checks the registry itself, so the checks happen at
+settlement time rather than only at account opening. Re-implementing them in the settlement
+contract would create a second source of truth that drifts from the first, and the
+settlement path is precisely where that drift would go unnoticed. The settlement contract
+stays token-agnostic and lets either leg refuse.
+
+**The two legs do not check the same things**, and the settlement contract does not need to
+know which is which. Both require payer and payee to be approved, both block a frozen
+sender, and both check the settlement contract for sanctions as the spender. Only the cash
+leg reads a tier, because only the cash leg enforces transfer limits: a daily cap is an AML
+control on money, and the asset leg deliberately carries none
+([asset section 4](design-asset.md#4-no-transfer-limits)). One consequence is worth
+carrying at this level. An address can be eligible to hold the bond while unable to move
+cash, so a trade with such a party fails on the cash leg, with the cash leg's own error.
+Classification failures surface in one place rather than two.
 
 **The registry stays a separate repository**, consumed as a pinned submodule. It is
 independently governed and UUPS-upgradeable, so which commit is under review has to be
 explicit — see [_What `immutable` does not buy_](design-cash.md#what-immutable-does-not-buy).
+Both tokens inherit its upgrade governance as their trust root, so the settlement contract
+rests on one trust assumption rather than two.
