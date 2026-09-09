@@ -177,6 +177,27 @@ The recipient is never exempt. A forced transfer delivers real securities to a r
 so `isApproved(to)` runs on it like any other delivery. The bypass is sender-side only,
 and only for the sender a freeze has already identified.
 
+### Previewing the checks
+
+```solidity
+function canTransfer(address from, address to, uint256 value)
+    external view returns (bool ok, bytes4 reason);
+function canTransferFrom(address spender, address from, address to, uint256 value)
+    external view returns (bool ok, bytes4 reason);
+```
+
+Same as [cash section 3](design-cash.md#previewing-the-checks), and for the same reason: a
+settlement contract needs to know whether a delivery would succeed without asking the
+registry itself, which would duplicate these rules outside the token
+([settlement section 5](design-settlement.md#5-compliance-stays-in-the-tokens)). One
+internal predicate serves both the preview and the enforcement, and `reason` is the
+selector of the error the real call would revert with.
+
+The answers are cheaper here than on the cash leg, because there is no tier to read and no
+daily total to accumulate ([section 4](#4-no-transfer-limits)). A forced transfer
+([section 8](#8-a-bond-cannot-be-destroyed-and-recreated)) has no preview: it bypasses the
+sender-side checks by design, so there is no question to ask.
+
 ### Freezing does not clear allowances
 
 Unchanged from [cash section 3](design-cash.md#freezing-does-not-clear-allowances). A
@@ -571,7 +592,9 @@ measuring before shaping a shared interface around one consumer.
 
 A settlement pays for both legs. The number that decides whether the network meets its
 settlement window is not either token's transfer cost but the sum of the two plus the
-settlement contract's own overhead, and measuring that belongs to `design-settlement.md`.
+settlement contract's own overhead. That measurement belongs to
+[settlement section 12](design-settlement.md#12-gas), which puts the total at seven
+registry round trips per settlement.
 
 On a permissioned Besu network gas price is zero or near zero, so this is a throughput
 question rather than a cost one.

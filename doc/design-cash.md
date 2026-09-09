@@ -183,6 +183,37 @@ it exists for. Nothing is loosened by this. `_update` was never what stopped an 
 holder from burning — there is no public burn entry point, and both burn paths are
 `ISSUER_ROLE`.
 
+### Previewing the checks
+
+The rules above are enforced when a transfer runs. A caller often needs the answer before
+that, and a settlement contract needs it most of all: it cannot ask the registry itself
+without duplicating this section
+([settlement section 5](design-settlement.md#5-compliance-stays-in-the-tokens)).
+
+```solidity
+function canTransfer(address from, address to, uint256 value)
+    external view returns (bool ok, bytes4 reason);
+function canTransferFrom(address spender, address from, address to, uint256 value)
+    external view returns (bool ok, bytes4 reason);
+```
+
+Two functions because the two paths check different things: only `transferFrom` looks at
+the spender, and only it consults an allowance. Mirroring the split means a caller never
+has to invent a spender to ask about a plain payment.
+
+**The preview and the enforcement are the same predicate.** One internal function decides;
+`_update` and `transferFrom` revert on what it returns, and these two hand it back
+unchanged. A preview written separately would be a second copy of the rules in the one
+place nobody would notice it drifting.
+
+**`reason` is the selector of the error the real call would revert with**, not a code of
+our own. There is then nothing to keep in step: the vocabulary is the error list itself.
+The balance and allowance checks are included, so a caller gets the whole answer rather
+than the compliance half of it.
+
+These are views over state that can change in the next block. They answer "would this work
+now", which is what an operator needs before submitting, not a guarantee.
+
 ### Freezing does not clear allowances
 
 A freeze blocks outbound transfers, so `transferFrom` from a frozen account reverts. The
@@ -417,12 +448,16 @@ evolve because sanctions regimes and KYC requirements evolve. A unit of currency
 
 ### No `permit` (EIP-2612), for now
 
-The [scope section](DESIGN.md#scope) notes that allowances are granted shortly before
-settling, because an allowance is permission rather than escrow and a stale one is a
-settlement that fails. That gap is exactly what EIP-2612 closes: `permit` turns an approval
-into a signature, so a settlement contract can carry both banks' signed approvals and do
-approve, approve and settle in one transaction. There is then no window at all in which an
-allowance sits unused — which is the same instinct that motivates DvP in the first place.
+The [scope section](DESIGN.md#scope) notes that an allowance is permission rather than
+escrow, so a stale one is a settlement that fails. The buyer can hold that window down to
+seconds by sending `approve` and `settle` back-to-back, but not to zero: they are calls to
+two different contracts, so they are two transactions. The seller's window is wider still,
+because its allowance has to stand from `propose` until the trade settles or expires
+([settlement section 3](design-settlement.md#3-lifecycle)). That gap is exactly what
+EIP-2612 closes: `permit` turns an approval into a signature, so a settlement contract can
+carry both banks' signed approvals and do approve, approve and settle in one transaction.
+There is then no window at all in which an allowance sits unused — which is the same
+instinct that motivates DvP in the first place.
 
 It is deferred rather than rejected. The argument for it is real, and stronger here than the
 usual one: `permit` is normally sold as gasless approval via a relayer, a motivation that

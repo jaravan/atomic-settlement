@@ -7,6 +7,11 @@ trade and the contract that moves them together, so the asset changes hands if a
 the cash does. Compliance is enforced by the tokens themselves, not by the systems around
 them.
 
+**Settlement only.** Counterparties are found and prices agreed off-chain, on a trading
+venue or over the phone, before any contract here is called. Real markets separate the two
+the same way — trade on a venue, settle at a depository — and this is the depository half
+([settlement section 11](design-settlement.md#11-what-this-contract-does-not-do)).
+
 | Contract        | Role                                                                      |
 | --------------- | ------------------------------------------------------------------------- |
 | `TokenizedCash` | the cash leg; could represent commercial bank money, or a simplified CBDC |
@@ -89,10 +94,15 @@ A transaction either fully succeeds or fully reverts, so "at the same time" is f
 **settlement contract** — here `DvPSettlement` — does both transfers in one call:
 
 ```
-Bank A  ──approve(settlement, 1,000,000)──▶  TokenizedCash    ← cash leg
-Bank B  ──approve(settlement, 100 bonds)──▶  AssetToken       ← asset leg
+seller B ──approve(settlement, 100 bonds)───▶ AssetToken      ← asset leg
+seller B ──propose(buyer A, 1,000,000 for 100, deadline)──▶ DvPSettlement
+                                                              returns a tradeId,
+                                                              moves nothing
 
-           DvPSettlement.settle(tradeId)          ← one transaction
+buyer A  ──approve(settlement, 1,000,000)───▶ TokenizedCash   ← cash leg
+
+           DvPSettlement.settle(tradeId, termsHash)   ← one transaction
+                        │                             the buyer asserts the terms
                         │
                         ├── cash.transferFrom(A → B, 1,000,000)
                         └── asset.transferFrom(B → A, 100)
@@ -102,6 +112,13 @@ Bank B  ──approve(settlement, 100 bonds)──▶  AssetToken       ← asse
 
 - Each bank grants the settlement contract an **allowance**: permission to move a set
   amount on their behalf
+- **Settling takes two calls, and only the second moves value.** The seller proposes the
+  terms, and the buyer's `settle` restates them and is both the acceptance and the
+  execution. Two independent assertions of one trade, and nothing moves unless they agree.
+  `propose` records terms and moves nothing, so the atomicity above is untouched. Terms
+  must be recorded on-chain first, because an allowance authorises an amount and not a
+  trade
+  ([settlement section 2](design-settlement.md#2-a-trade-is-agreed-before-it-settles))
 - The contract calls `transferFrom` on each token
 - If either leg fails (A is frozen, B lacks the bonds) the whole transaction reverts
 
@@ -109,10 +126,14 @@ Bank B  ──approve(settlement, 100 bonds)──▶  AssetToken       ← asse
 > It writes one record, `allowance[BankA][settlement] = 1,000,000`, and Bank A keeps full
 > control of the funds. A can approve and then spend the same money elsewhere;
 > `transferFrom` later fails on insufficient balance and the settlement reverts. Nothing is
-> lost, but the settlement fails. Hence allowances are granted shortly before settling, not
-> far in advance. [Section 9](design-cash.md#no-permit-eip-2612-for-now) covers why the
-> obvious way to close that gap — EIP-2612 `permit`, folding both approvals into the
-> settlement transaction — is deferred rather than adopted.
+> lost, but the settlement fails. The buyer keeps its window down to seconds by sending
+> `approve` and `settle` back-to-back, two transactions it submits itself at a moment it
+> chooses. The seller cannot: its allowance has to stand from `propose` until the trade
+> settles or expires, which is one of the reasons every proposal carries a deadline
+> ([settlement section 4](design-settlement.md#4-every-proposal-expires)).
+> [Cash section 9](design-cash.md#no-permit-eip-2612-for-now) covers why the obvious way to
+> close that gap — EIP-2612 `permit`, folding both approvals into the settlement
+> transaction — is deferred rather than adopted.
 
 **Escrow is not an alternative here**, so this is a requirement on the settlement contract
 rather than a preference. An escrowing contract takes custody first: the cash moves into
@@ -121,9 +142,9 @@ never be, so the funding call would always revert. The spender exemption in
 [cash section 3](design-cash.md#3-who-gets-checked-on-a-transfer) relaxes `isApproved` for
 `msg.sender` only; widening it to recipients would mean whitelisting contract addresses,
 exactly what [cash section 1](design-cash.md#1-compliance-state-lives-in-the-registry-not-the-token)
-rejects. `DvPSettlement` therefore moves cash directly from payer to payee and never takes
-custody of either leg, and any other settlement contract built against either token must do
-the same.
+rejects. `DvPSettlement` therefore moves cash directly from buyer to seller, and the bond
+straight back, never taking custody of either leg. Any other settlement contract built
+against either token must do the same.
 
 ### Two ways the cash moves
 
@@ -171,7 +192,7 @@ on the registry; never the reverse.
 separately governed. Nothing else is. A unit of currency does not change, the terms of a
 bond change less still, and settlement workflows do evolve but the contract that runs them
 holds no balances, so replacing it is a redeployment rather than a migration
-([settlement section 9](design-settlement.md#9-not-upgradeable)).
+([settlement section 10](design-settlement.md#10-not-upgradeable)).
 
 **Compliance is enforced by the tokens, not by the settlement contract.** `settle()` calls
 `transferFrom` and each token checks the registry itself, so the checks happen at
@@ -181,7 +202,7 @@ settlement path is precisely where that drift would go unnoticed. The settlement
 stays token-agnostic and lets either leg refuse.
 
 **The two legs do not check the same things**, and the settlement contract does not need to
-know which is which. Both require payer and payee to be approved, both block a frozen
+know which is which. Both require buyer and seller to be approved, both block a frozen
 sender, and both check the settlement contract for sanctions as the spender. Only the cash
 leg reads a tier, because only the cash leg enforces transfer limits: a daily cap is an AML
 control on money, and the asset leg deliberately carries none
