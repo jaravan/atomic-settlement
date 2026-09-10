@@ -585,10 +585,18 @@ a vanilla one. At a 30M block limit that is roughly 318 compliant transfers per 
 752, so the compliance layer costs about **2.4x in throughput** — the number to hold against
 the network's settlement window.
 
-**These are a floor, not a ceiling.** The measurement uses a mock registry behind a minimal
-proxy. The real `KYCRegistry` reads a fuller record per call, so production figures will be
-higher. What the mock captures faithfully is the *shape*: three or four cross-contract calls
-per transfer, each paying a cold account access and a proxy hop.
+**Checked against the real registry.** `test/Integration.t.sol` runs the same path against
+`KYCRegistryV2` behind a real ERC-1967 proxy, and the figures agree:
+
+| `transfer`                  |   cold |   warm |
+| --------------------------- | -----: | -----: |
+| mock + `delegatecall` proxy | 73,391 | 14,391 |
+| real registry + UUPS proxy  | 73,126 | 16,126 |
+
+Cold is within 0.4%, so the cold figure is dominated by the three cross-contract calls and
+their account accesses rather than by anything the registry does inside them. Warm is ~1,700
+higher against the real registry, which is the fuller `Record` it reads once the accounts are
+already warm. The mock is a sound stand-in for this measurement.
 
 **So `complianceOf` is now justified by evidence**, on the terms section 1 set: it would fold
 three or four round trips into one and take the largest single component of the overhead with
