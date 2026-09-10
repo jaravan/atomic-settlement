@@ -3,7 +3,8 @@ pragma solidity 0.8.30;
 
 import {IKYCRegistryV2, Tier} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
 
-/// @notice In-memory stand-in for the real registry, so token tests do not deploy a UUPS proxy.
+/// @notice Stand-in for the real registry, so a test can set the answers a transfer depends
+///         on -- approval, sanctions, tier -- instead of onboarding through the real one.
 contract MockKYCRegistry is IKYCRegistryV2 {
     mapping(address account => bool) private _approved;
     mapping(address account => bool) private _sanctioned;

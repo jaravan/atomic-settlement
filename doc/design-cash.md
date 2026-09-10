@@ -549,10 +549,54 @@ need them. And a getter shaped for one consumer is a coupling between the two re
 should be paid for by evidence, not by assumption — section 1 spends real design effort
 keeping this token's dependency on the registry minimal and legible.
 
-**Not yet measured.** The comparison against a vanilla ERC-20 will come from `forge
-snapshot` output committed to the repo and gated in CI. If the compliance overhead threatens
-the network's settlement window, `complianceOf` is the change to make, and this section
-should record the before-and-after rather than the intention.
+### Measured
+
+`test/Gas.t.sol`, against an unmodified OpenZeppelin ERC-20 with the same decimals. Registry
+reads go through a `delegatecall` proxy so the UUPS hop is included. Each path is measured
+twice: **cold** is the first call, the state a real transaction starts from; **warm** is a
+second call in the same transaction. Figures exclude the 21,000 base transaction cost.
+
+| path                          |   cold |   warm | vs vanilla (cold) |
+| ----------------------------- | -----: | -----: | ----------------: |
+| vanilla `transfer`            | 18,888 |  4,788 |          baseline |
+| `transfer`, `NO_LIMIT` tier   | 49,412 | 12,312 |          +30,524 |
+| `transfer`, capped tier       | 73,391 | 14,391 |          +54,503 |
+| `transferFrom`, capped tier   | 80,031 | 17,028 |          +61,143 |
+| `mint`                        | 36,407 |  9,304 |                 - |
+| `burn`                        |      - |  6,869 |                 - |
+| `canTransfer` (view)          | 44,314 |      - |                 - |
+
+Three things the numbers say:
+
+- **The registry calls dominate, not the accumulator.** `NO_LIMIT` skips the daily slot
+  entirely and still costs +30,524 over vanilla — roughly 10,000 per `STATICCALL` once the
+  cold account access and the proxy's `delegatecall` hop are paid. That is the compliance
+  overhead, and it is where `complianceOf` would act.
+- **The daily accumulator costs +23,979 cold, +2,079 warm.** Almost all of the cold figure is
+  the `0 -> nonzero` `SSTORE` the first time a sender transacts on a new day; every later
+  transfer that day writes an existing slot. Packing `DailyUsage` into one word (section 4) is
+  what keeps this a single write.
+- **`transferFrom` adds 6,640 over `transfer`** — `isSanctioned(spender)` plus the allowance
+  read. Section 3's decision to keep that check off the direct path is worth about that much
+  on every plain payment.
+
+**Throughput.** A capped `transfer` is ~94,400 gas as a whole transaction against ~39,900 for
+a vanilla one. At a 30M block limit that is roughly 318 compliant transfers per block against
+752, so the compliance layer costs about **2.4x in throughput** — the number to hold against
+the network's settlement window.
+
+**These are a floor, not a ceiling.** The measurement uses a mock registry behind a minimal
+proxy. The real `KYCRegistry` reads a fuller record per call, so production figures will be
+higher. What the mock captures faithfully is the *shape*: three or four cross-contract calls
+per transfer, each paying a cold account access and a proxy hop.
+
+**So `complianceOf` is now justified by evidence**, on the terms section 1 set: it would fold
+three or four round trips into one and take the largest single component of the overhead with
+it. It remains a change to the registry repo, and the before-and-after belongs here when it
+lands.
+
+The benchmark lives in `src/test/Gas.t.sol` and runs with the rest of the suite, so the
+figures above can be regenerated with `forge test --match-path test/Gas.t.sol -vv`.
 
 On a permissioned Besu network gas price is zero or near zero, so this is a **throughput**
 question, not a cost one: gas per transfer determines transactions per block, which
