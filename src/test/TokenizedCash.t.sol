@@ -7,7 +7,7 @@ import {IKYCRegistryV2} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
 import {TokenizedCash} from "../src/TokenizedCash.sol";
 import {MockKYCRegistry} from "./mocks/MockKYCRegistry.sol";
 
-/// @notice Steps 1-2: construction, roles, denomination, and the registry gate.
+/// @notice Steps 1-3: construction, roles, denomination, the registry gate, and freeze.
 contract TokenizedCashTest is Test {
     TokenizedCash internal cash;
     MockKYCRegistry internal registry;
@@ -262,5 +262,171 @@ contract TokenizedCashTest is Test {
         vm.expectRevert(abi.encodeWithSelector(TokenizedCash.NotApproved.selector, BOB));
         vm.prank(SETTLEMENT);
         cash.transferFrom(ALICE, BOB, AMOUNT);
+    }
+
+    // -- freeze (section 5) --------------------------------------------------------------
+
+    bytes32 internal constant REASON = bytes32("SANCTIONS_HIT");
+
+    function _officer() private returns (address) {
+        vm.prank(ADMIN);
+        cash.grantRole(officerRole, OFFICER);
+        return OFFICER;
+    }
+
+    function test_freeze_blocksOutbound() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(_officer());
+        cash.freeze(ALICE, REASON);
+
+        assertTrue(cash.frozen(ALICE));
+
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.SenderFrozen.selector, ALICE));
+        vm.prank(ALICE);
+        cash.transfer(BOB, AMOUNT);
+    }
+
+    /// @dev Matches a frozen bank account: incoming payments land, nothing moves out.
+    function test_freeze_stillAllowsInbound() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(_officer());
+        cash.freeze(BOB, REASON);
+
+        vm.prank(ALICE);
+        cash.transfer(BOB, AMOUNT);
+
+        assertEq(cash.balanceOf(BOB), AMOUNT);
+    }
+
+    function test_unfreeze_restoresSending() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        address officer = _officer();
+        vm.prank(officer);
+        cash.freeze(ALICE, REASON);
+        vm.prank(officer);
+        cash.unfreeze(ALICE, REASON);
+
+        assertFalse(cash.frozen(ALICE));
+
+        vm.prank(ALICE);
+        cash.transfer(BOB, AMOUNT);
+
+        assertEq(cash.balanceOf(BOB), AMOUNT);
+    }
+
+    function test_freeze_blocksTransferFrom() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(ALICE);
+        cash.approve(SETTLEMENT, AMOUNT);
+
+        vm.prank(_officer());
+        cash.freeze(ALICE, REASON);
+
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.SenderFrozen.selector, ALICE));
+        vm.prank(SETTLEMENT);
+        cash.transferFrom(ALICE, BOB, AMOUNT);
+    }
+
+    /// @dev Freezing does not clear allowances (section 3): the approval survives, unusable
+    ///      until the freeze lifts.
+    function test_freeze_leavesAllowanceIntact() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(ALICE);
+        cash.approve(SETTLEMENT, AMOUNT);
+
+        address officer = _officer();
+        vm.prank(officer);
+        cash.freeze(ALICE, REASON);
+
+        assertEq(cash.allowance(ALICE, SETTLEMENT), AMOUNT, "allowance must survive the freeze");
+
+        vm.prank(officer);
+        cash.unfreeze(ALICE, REASON);
+
+        vm.prank(SETTLEMENT);
+        cash.transferFrom(ALICE, BOB, AMOUNT);
+
+        assertEq(cash.balanceOf(BOB), AMOUNT);
+    }
+
+    /// @dev The unapproved check runs first, so a frozen-and-unapproved account reports the
+    ///      registry problem rather than the freeze.
+    function test_freeze_approvalCheckPrecedesFreezeCheck() public {
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(_officer());
+        cash.freeze(ALICE, REASON);
+
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.NotApproved.selector, ALICE));
+        vm.prank(ALICE);
+        cash.transfer(BOB, AMOUNT);
+    }
+
+    function test_freeze_emitsEventWithReasonAndCaller() public {
+        address officer = _officer();
+
+        vm.expectEmit(true, true, true, true);
+        emit TokenizedCash.AccountFrozen(ALICE, REASON, officer);
+        vm.prank(officer);
+        cash.freeze(ALICE, REASON);
+
+        vm.expectEmit(true, true, true, true);
+        emit TokenizedCash.AccountUnfrozen(ALICE, REASON, officer);
+        vm.prank(officer);
+        cash.unfreeze(ALICE, REASON);
+    }
+
+    function test_freeze_isIdempotent() public {
+        address officer = _officer();
+        vm.prank(officer);
+        cash.freeze(ALICE, REASON);
+        vm.prank(officer);
+        cash.freeze(ALICE, REASON);
+
+        assertTrue(cash.frozen(ALICE));
+    }
+
+    function test_freeze_requiresComplianceOfficer() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, STRANGER, officerRole)
+        );
+        vm.prank(STRANGER);
+        cash.freeze(ALICE, REASON);
+    }
+
+    /// @dev Admin holds the role-granting root but not the freeze power itself (section 2).
+    function test_freeze_adminCannotFreezeWithoutGrantingItself() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, ADMIN, officerRole)
+        );
+        vm.prank(ADMIN);
+        cash.freeze(ALICE, REASON);
+    }
+
+    function test_unfreeze_requiresComplianceOfficer() public {
+        vm.prank(_officer());
+        cash.freeze(ALICE, REASON);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, STRANGER, officerRole)
+        );
+        vm.prank(STRANGER);
+        cash.unfreeze(ALICE, REASON);
     }
 }
