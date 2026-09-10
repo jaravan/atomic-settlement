@@ -3,11 +3,12 @@ pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {IKYCRegistryV2} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
 import {TokenizedCash} from "../src/TokenizedCash.sol";
 import {MockKYCRegistry} from "./mocks/MockKYCRegistry.sol";
 
-/// @notice Steps 1-3: construction, roles, denomination, the registry gate, and freeze.
+/// @notice Steps 1-4: construction, roles, denomination, the registry gate, freeze and pause.
 contract TokenizedCashTest is Test {
     TokenizedCash internal cash;
     MockKYCRegistry internal registry;
@@ -428,5 +429,136 @@ contract TokenizedCashTest is Test {
         );
         vm.prank(STRANGER);
         cash.unfreeze(ALICE, REASON);
+    }
+
+    // -- pause (section 6) ---------------------------------------------------------------
+
+    function _pauser() private returns (address) {
+        vm.prank(ADMIN);
+        cash.grantRole(pauserRole, OFFICER);
+        return OFFICER;
+    }
+
+    function test_pause_blocksTransfer() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(_pauser());
+        cash.pause();
+
+        assertTrue(cash.paused());
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(ALICE);
+        cash.transfer(BOB, AMOUNT);
+    }
+
+    function test_pause_blocksTransferFrom() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(ALICE);
+        cash.approve(SETTLEMENT, AMOUNT);
+
+        vm.prank(_pauser());
+        cash.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(SETTLEMENT);
+        cash.transferFrom(ALICE, BOB, AMOUNT);
+    }
+
+    /// @dev Blocked so a pause cannot be used to stage a drain for the moment it lifts.
+    function test_pause_blocksApprove() public {
+        _approve(ALICE);
+
+        vm.prank(_pauser());
+        cash.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(ALICE);
+        cash.approve(SETTLEMENT, AMOUNT);
+    }
+
+    /// @dev Views stay readable while paused (section 6).
+    function test_pause_leavesViewsReadable() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(ALICE);
+        cash.approve(SETTLEMENT, AMOUNT);
+
+        vm.prank(_pauser());
+        cash.pause();
+
+        assertEq(cash.balanceOf(ALICE), AMOUNT);
+        assertEq(cash.allowance(ALICE, SETTLEMENT), AMOUNT);
+        assertEq(cash.totalSupply(), AMOUNT);
+        assertEq(cash.decimals(), 6);
+        assertFalse(cash.frozen(ALICE));
+    }
+
+    function test_unpause_restoresTransfers() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        address pauser = _pauser();
+        vm.prank(pauser);
+        cash.pause();
+        vm.prank(pauser);
+        cash.unpause();
+
+        assertFalse(cash.paused());
+
+        vm.prank(ALICE);
+        cash.transfer(BOB, AMOUNT);
+
+        assertEq(cash.balanceOf(BOB), AMOUNT);
+    }
+
+    /// @dev A pause is a network-incident control; it must not disarm the per-address one.
+    function test_pause_doesNotBlockFreezing() public {
+        vm.prank(_pauser());
+        cash.pause();
+
+        vm.prank(_officer());
+        cash.freeze(ALICE, REASON);
+
+        assertTrue(cash.frozen(ALICE));
+    }
+
+    function test_pause_requiresPauserRole() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, STRANGER, pauserRole)
+        );
+        vm.prank(STRANGER);
+        cash.pause();
+    }
+
+    function test_unpause_requiresPauserRole() public {
+        vm.prank(_pauser());
+        cash.pause();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, STRANGER, pauserRole)
+        );
+        vm.prank(STRANGER);
+        cash.unpause();
+    }
+
+    /// @dev The compliance officer role does not carry the emergency stop (section 2).
+    function test_pause_complianceOfficerCannotPause() public {
+        // Hoisted: the helper makes a call of its own, which vm.expectRevert would latch onto.
+        address officer = _officer();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, officer, pauserRole)
+        );
+        vm.prank(officer);
+        cash.pause();
     }
 }

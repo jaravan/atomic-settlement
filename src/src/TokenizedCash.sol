@@ -3,13 +3,14 @@ pragma solidity 0.8.30;
 
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {IKYCRegistryV2} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
 
 /// @title TokenizedCash
 /// @notice The cash leg of an atomic DvP settlement: an ERC-20 representing commercial bank
 ///         money, or a simplified CBDC, with compliance enforced by the contract itself.
 /// @dev Design: doc/design-cash.md
-contract TokenizedCash is ERC20, AccessControl {
+contract TokenizedCash is ERC20, AccessControl, Pausable {
     // ---------------------------------------------------------------------------------
     // Roles (section 2)
     // ---------------------------------------------------------------------------------
@@ -108,9 +109,17 @@ contract TokenizedCash is ERC20, AccessControl {
         return super.transferFrom(from, to, value);
     }
 
+    /// @inheritdoc ERC20
+    /// @dev Granting new spending authority during an incident serves no purpose and could
+    ///      stage a drain for the moment the pause lifts (section 6).
+    function approve(address spender, uint256 value) public override whenNotPaused returns (bool) {
+        return super.approve(spender, value);
+    }
+
     /// @dev The one place every transfer, mint and burn passes through: in OpenZeppelin
     ///      v5.6.1 _update is the only virtual hook on the transfer path.
-    function _update(address from, address to, uint256 value) internal override {
+    /// @dev whenNotPaused here covers transfers, mints and burns in one place (section 6).
+    function _update(address from, address to, uint256 value) internal override whenNotPaused {
         // A burn (to == 0) delivers to nobody, so the sender side is not guarded: there is
         // no counterparty to protect, and it is what makes burnFrom possible (section 3).
         if (from != address(0) && to != address(0)) {
@@ -142,5 +151,20 @@ contract TokenizedCash is ERC20, AccessControl {
     function unfreeze(address account, bytes32 reason) external onlyRole(COMPLIANCE_OFFICER_ROLE) {
         frozen[account] = false;
         emit AccountUnfrozen(account, reason, msg.sender);
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Pause (section 6)
+    // ---------------------------------------------------------------------------------
+
+    /// @notice Halt all transfers, mints, burns and approvals. Views stay readable.
+    /// @dev A network-incident control. Freeze is the per-address instrument (section 6).
+    function pause() external onlyRole(PAUSER_ROLE) {
+        _pause();
+    }
+
+    /// @notice Resume.
+    function unpause() external onlyRole(PAUSER_ROLE) {
+        _unpause();
     }
 }
