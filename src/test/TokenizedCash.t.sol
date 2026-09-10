@@ -8,7 +8,7 @@ import {IKYCRegistryV2} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
 import {TokenizedCash} from "../src/TokenizedCash.sol";
 import {MockKYCRegistry} from "./mocks/MockKYCRegistry.sol";
 
-/// @notice Steps 1-4: construction, roles, denomination, the registry gate, freeze and pause.
+/// @notice Steps 1-5: construction, roles, denomination, the registry gate, freeze, pause and supply.
 contract TokenizedCashTest is Test {
     TokenizedCash internal cash;
     MockKYCRegistry internal registry;
@@ -143,7 +143,8 @@ contract TokenizedCashTest is Test {
 
     uint256 internal constant AMOUNT = 100e6;
 
-    /// @dev Balances are written directly: mint arrives in step 5.
+    /// @dev Written directly rather than minted, because several tests need a holder whose
+    ///      approval has lapsed -- a state mint cannot produce but the registry can.
     function _fund(address who, uint256 amount) private {
         deal(address(cash), who, amount, true);
     }
@@ -560,5 +561,227 @@ contract TokenizedCashTest is Test {
         );
         vm.prank(officer);
         cash.pause();
+    }
+
+    // -- supply (section 7) --------------------------------------------------------------
+
+    function _issuer() private returns (address) {
+        vm.prank(ADMIN);
+        cash.grantRole(issuerRole, ISSUER);
+        return ISSUER;
+    }
+
+    function test_mint_creditsApprovedRecipient() public {
+        _approve(ALICE);
+
+        vm.prank(_issuer());
+        cash.mint(ALICE, AMOUNT);
+
+        assertEq(cash.balanceOf(ALICE), AMOUNT);
+        assertEq(cash.totalSupply(), AMOUNT);
+    }
+
+    /// @dev Closes the gap left by step 2: the `to` branch of _update had no coverage on the
+    ///      mint path, because nothing could mint yet.
+    function test_mint_revertsForUnapprovedRecipient() public {
+        address issuer = _issuer();
+
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.NotApproved.selector, ALICE));
+        vm.prank(issuer);
+        cash.mint(ALICE, AMOUNT);
+    }
+
+    function test_mint_emitsAttributedEvent() public {
+        _approve(ALICE);
+        address issuer = _issuer();
+
+        vm.expectEmit(true, true, true, true);
+        emit TokenizedCash.Minted(ALICE, AMOUNT, issuer);
+        vm.prank(issuer);
+        cash.mint(ALICE, AMOUNT);
+    }
+
+    function test_mint_requiresIssuerRole() public {
+        _approve(ALICE);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, STRANGER, issuerRole)
+        );
+        vm.prank(STRANGER);
+        cash.mint(ALICE, AMOUNT);
+    }
+
+    function test_mint_blockedWhilePaused() public {
+        _approve(ALICE);
+        address issuer = _issuer();
+
+        vm.prank(_pauser());
+        cash.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(issuer);
+        cash.mint(ALICE, AMOUNT);
+    }
+
+    // -- burn --------------------------------------------------------------------------
+
+    function test_burn_takesFromIssuerOwnBalance() public {
+        address issuer = _issuer();
+        _approve(issuer);
+
+        vm.prank(issuer);
+        cash.mint(issuer, AMOUNT);
+
+        vm.expectEmit(true, true, true, true);
+        emit TokenizedCash.Burned(issuer, AMOUNT, issuer);
+        vm.prank(issuer);
+        cash.burn(AMOUNT);
+
+        assertEq(cash.balanceOf(issuer), 0);
+        assertEq(cash.totalSupply(), 0);
+    }
+
+    function test_burn_requiresIssuerRole() public {
+        _fund(STRANGER, AMOUNT);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, STRANGER, issuerRole)
+        );
+        vm.prank(STRANGER);
+        cash.burn(AMOUNT);
+    }
+
+    // -- burnFrom: the two-key seizure control (sections 7, 9) ---------------------------
+
+    function test_burnFrom_revertsUnlessFrozen() public {
+        _approve(ALICE);
+        address issuer = _issuer();
+        vm.prank(issuer);
+        cash.mint(ALICE, AMOUNT);
+
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.AccountNotFrozen.selector, ALICE));
+        vm.prank(issuer);
+        cash.burnFrom(ALICE, AMOUNT, REASON);
+    }
+
+    function test_burnFrom_succeedsOnceFrozen() public {
+        _approve(ALICE);
+        address issuer = _issuer();
+        vm.prank(issuer);
+        cash.mint(ALICE, AMOUNT);
+
+        vm.prank(_officer());
+        cash.freeze(ALICE, REASON);
+
+        vm.expectEmit(true, true, true, true);
+        emit TokenizedCash.ForcedBurn(ALICE, AMOUNT, REASON, issuer);
+        vm.prank(issuer);
+        cash.burnFrom(ALICE, AMOUNT, REASON);
+
+        assertEq(cash.balanceOf(ALICE), 0);
+        assertEq(cash.totalSupply(), 0);
+    }
+
+    /// @dev A seizure target is typically sanctioned. Requiring isApproved would disable the
+    ///      function exactly when it is needed, which is why a burn skips sender checks.
+    function test_burnFrom_worksOnSanctionedHolder() public {
+        _approve(ALICE);
+        address issuer = _issuer();
+        vm.prank(issuer);
+        cash.mint(ALICE, AMOUNT);
+
+        vm.prank(_officer());
+        cash.freeze(ALICE, REASON);
+        registry.setSanctioned(ALICE, true);
+
+        assertFalse(registry.isApproved(ALICE));
+
+        vm.prank(issuer);
+        cash.burnFrom(ALICE, AMOUNT, REASON);
+
+        assertEq(cash.balanceOf(ALICE), 0);
+    }
+
+    function test_burnFrom_requiresIssuerRole() public {
+        _fund(ALICE, AMOUNT);
+        vm.prank(_officer());
+        cash.freeze(ALICE, REASON);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, OFFICER, issuerRole)
+        );
+        vm.prank(OFFICER);
+        cash.burnFrom(ALICE, AMOUNT, REASON);
+    }
+
+    /// @dev The two keys must be two roles: an officer alone can freeze but not destroy, and
+    ///      an issuer alone cannot burn what has not been frozen.
+    function test_burnFrom_neitherRoleAloneCanSeize() public {
+        _approve(ALICE);
+        address issuer = _issuer();
+        vm.prank(issuer);
+        cash.mint(ALICE, AMOUNT);
+
+        // issuer alone: not frozen
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.AccountNotFrozen.selector, ALICE));
+        vm.prank(issuer);
+        cash.burnFrom(ALICE, AMOUNT, REASON);
+
+        // officer alone: freezes, but cannot burn
+        address officer = _officer();
+        vm.prank(officer);
+        cash.freeze(ALICE, REASON);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, officer, issuerRole)
+        );
+        vm.prank(officer);
+        cash.burnFrom(ALICE, AMOUNT, REASON);
+
+        assertEq(cash.balanceOf(ALICE), AMOUNT, "balance untouched by either role alone");
+    }
+
+    function test_burnFrom_blockedWhilePaused() public {
+        _approve(ALICE);
+        address issuer = _issuer();
+        vm.prank(issuer);
+        cash.mint(ALICE, AMOUNT);
+
+        vm.prank(_officer());
+        cash.freeze(ALICE, REASON);
+        vm.prank(_pauser());
+        cash.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(issuer);
+        cash.burnFrom(ALICE, AMOUNT, REASON);
+    }
+
+    /// @dev The invariant section 7 asks to be tested explicitly: because a burn skips the
+    ///      sender-side checks, ISSUER_ROLE is the whole of the protection on balances.
+    function test_noPublicPathReducesAnotherHoldersBalance() public {
+        _approve(ALICE);
+        address issuer = _issuer();
+        vm.prank(issuer);
+        cash.mint(ALICE, AMOUNT);
+
+        vm.prank(_officer());
+        cash.freeze(ALICE, REASON);
+
+        // every supply-reducing entry point, called by someone without ISSUER_ROLE
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, STRANGER, issuerRole)
+        );
+        vm.prank(STRANGER);
+        cash.burnFrom(ALICE, AMOUNT, REASON);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, STRANGER, issuerRole)
+        );
+        vm.prank(STRANGER);
+        cash.burn(AMOUNT);
+
+        assertEq(cash.balanceOf(ALICE), AMOUNT);
+        assertEq(cash.totalSupply(), AMOUNT);
     }
 }

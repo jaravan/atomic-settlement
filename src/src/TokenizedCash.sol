@@ -54,6 +54,11 @@ contract TokenizedCash is ERC20, AccessControl, Pausable {
     /// @notice The sender is frozen. Frozen accounts can still receive.
     error SenderFrozen(address account);
 
+    /// @notice `burnFrom` was called on an account that has not been frozen first.
+    /// @dev The frozen precondition is the whole control: destruction can only follow a
+    ///      public, attributed, reversible act by a different role (section 7).
+    error AccountNotFrozen(address account);
+
     /// @notice The party directing the transfer is sanctioned.
     /// @dev The only check made on the spender: on a settlement it is a contract, and a
     ///      contract can never be isApproved (section 3).
@@ -70,6 +75,16 @@ contract TokenizedCash is ERC20, AccessControl, Pausable {
 
     /// @notice Emitted on unfreeze, carrying the same enumerated code.
     event AccountUnfrozen(address indexed account, bytes32 reason, address indexed by);
+
+    /// @notice Emitted on mint. Every supply change is attributed to the acting issuer.
+    event Minted(address indexed to, uint256 value, address indexed issuer);
+
+    /// @notice Emitted when an issuer burns from its own balance.
+    event Burned(address indexed from, uint256 value, address indexed issuer);
+
+    /// @notice Emitted when an issuer burns from a frozen holder that has not consented.
+    /// @dev Distinct from `Burned` so a seizure is never mistaken for a redemption.
+    event ForcedBurn(address indexed account, uint256 value, bytes32 reason, address indexed issuer);
 
     // ---------------------------------------------------------------------------------
     // Construction
@@ -166,5 +181,33 @@ contract TokenizedCash is ERC20, AccessControl, Pausable {
     /// @notice Resume.
     function unpause() external onlyRole(PAUSER_ROLE) {
         _unpause();
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Supply (section 7)
+    // ---------------------------------------------------------------------------------
+
+    /// @notice Money entering the system: a deposit of reserves, or an issuer creating a
+    ///         liability. The recipient must be approved; no supply path consumes a tier cap.
+    function mint(address to, uint256 value) external onlyRole(ISSUER_ROLE) {
+        _mint(to, value);
+        emit Minted(to, value, msg.sender);
+    }
+
+    /// @notice The ordinary redemption route: takes from the issuer's own balance.
+    /// @dev To withdraw from a customer, the customer transfers to the issuer first and the
+    ///      issuer burns. Every cooperative redemption uses this and only this.
+    function burn(uint256 value) external onlyRole(ISSUER_ROLE) {
+        _burn(msg.sender, value);
+        emit Burned(msg.sender, value, msg.sender);
+    }
+
+    /// @notice Take from a holder that has not consented. Reverts unless already frozen.
+    /// @dev It names no recipient, so it can only destroy: total supply falls, which makes a
+    ///      seizure visible in supply reconciliation rather than reading as a payment.
+    function burnFrom(address account, uint256 value, bytes32 reason) external onlyRole(ISSUER_ROLE) {
+        if (!frozen[account]) revert AccountNotFrozen(account);
+        _burn(account, value);
+        emit ForcedBurn(account, value, reason, msg.sender);
     }
 }
