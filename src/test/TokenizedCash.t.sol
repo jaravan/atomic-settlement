@@ -4,11 +4,11 @@ pragma solidity 0.8.30;
 import {Test} from "forge-std/Test.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
-import {IKYCRegistryV2} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
+import {IKYCRegistryV2, Tier} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
 import {TokenizedCash} from "../src/TokenizedCash.sol";
 import {MockKYCRegistry} from "./mocks/MockKYCRegistry.sol";
 
-/// @notice Steps 1-5: construction, roles, denomination, the registry gate, freeze, pause and supply.
+/// @notice Steps 1-6: construction, roles, the registry gate, freeze, pause, supply and limits.
 contract TokenizedCashTest is Test {
     TokenizedCash internal cash;
     MockKYCRegistry internal registry;
@@ -32,6 +32,13 @@ contract TokenizedCashTest is Test {
     function setUp() public {
         registry = new MockKYCRegistry();
         cash = new TokenizedCash("Tokenized Euro", "tEUR", EUR, IKYCRegistryV2(address(registry)), ADMIN);
+
+        // Uncapped by default so tests that are not about limits are not about limits.
+        vm.startPrank(ADMIN);
+        cash.setTierLimits(Tier.RETAIL, cash.NO_LIMIT(), cash.NO_LIMIT());
+        cash.setTierLimits(Tier.INSTITUTIONAL, cash.NO_LIMIT(), cash.NO_LIMIT());
+        cash.setTierLimits(Tier.CROSS_BORDER, cash.NO_LIMIT(), cash.NO_LIMIT());
+        vm.stopPrank();
 
         adminRole = cash.DEFAULT_ADMIN_ROLE();
         issuerRole = cash.ISSUER_ROLE();
@@ -151,6 +158,17 @@ contract TokenizedCashTest is Test {
 
     function _approve(address who) private {
         registry.setApproved(who, true);
+        registry.setTier(who, Tier.RETAIL);
+    }
+
+    /// @dev Approved but unclassified: the state section 4 says must revert, not default.
+    function _approveWithoutTier(address who) private {
+        registry.setApproved(who, true);
+    }
+
+    function _setLimits(Tier tier, uint256 perTx, uint256 perDay) private {
+        vm.prank(ADMIN);
+        cash.setTierLimits(tier, perTx, perDay);
     }
 
     function test_transfer_succeedsWhenBothApproved() public {
@@ -783,5 +801,267 @@ contract TokenizedCashTest is Test {
 
         assertEq(cash.balanceOf(ALICE), AMOUNT);
         assertEq(cash.totalSupply(), AMOUNT);
+    }
+
+    // -- transfer limits (section 4) -----------------------------------------------------
+
+    uint256 internal constant PER_TX = 50e6;
+    uint256 internal constant PER_DAY = 120e6;
+
+    uint256 internal constant SOME_TIME = 1_700_000_000;
+
+    /// @dev `ts` must be a typed variable: with two literals Solidity evaluates `/` as exact
+    ///      rational arithmetic at compile time, so it would not truncate to a day boundary.
+    function _nextUtcMidnightAfter(uint256 ts) private pure returns (uint256) {
+        return (ts / 1 days + 1) * 1 days;
+    }
+
+    /// @dev Per-transaction uncapped, so a test about the daily window is only about that.
+    function _retailPairDailyOnly() private {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, 1_000e6);
+        _setLimits(Tier.RETAIL, cash.NO_LIMIT(), PER_DAY);
+    }
+
+    function _retailPair() private {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, 1_000e6);
+        _setLimits(Tier.RETAIL, PER_TX, PER_DAY);
+    }
+
+    function test_limits_perTransactionAllowsExactly() public {
+        _retailPair();
+
+        vm.prank(ALICE);
+        cash.transfer(BOB, PER_TX);
+
+        assertEq(cash.balanceOf(BOB), PER_TX);
+    }
+
+    function test_limits_perTransactionRejectsOneOver() public {
+        _retailPair();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(TokenizedCash.TransactionLimitExceeded.selector, ALICE, PER_TX + 1, PER_TX)
+        );
+        vm.prank(ALICE);
+        cash.transfer(BOB, PER_TX + 1);
+    }
+
+    function test_limits_dailyAccumulates() public {
+        _retailPair();
+
+        vm.startPrank(ALICE);
+        cash.transfer(BOB, 50e6);
+        assertEq(cash.dailySpent(ALICE), 50e6);
+        cash.transfer(BOB, 50e6);
+        assertEq(cash.dailySpent(ALICE), 100e6);
+        vm.stopPrank();
+    }
+
+    function test_limits_dailyAllowsExactly() public {
+        _retailPair();
+
+        vm.startPrank(ALICE);
+        cash.transfer(BOB, 50e6);
+        cash.transfer(BOB, 50e6);
+        cash.transfer(BOB, 20e6);
+        vm.stopPrank();
+
+        assertEq(cash.dailySpent(ALICE), PER_DAY);
+        assertEq(cash.balanceOf(BOB), PER_DAY);
+    }
+
+    function test_limits_dailyRejectsOneOver() public {
+        _retailPair();
+
+        vm.startPrank(ALICE);
+        cash.transfer(BOB, 50e6);
+        cash.transfer(BOB, 50e6);
+        cash.transfer(BOB, 20e6);
+
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.DailyLimitExceeded.selector, ALICE, 1, PER_DAY, PER_DAY));
+        cash.transfer(BOB, 1);
+        vm.stopPrank();
+    }
+
+    /// @dev A calendar day, not a rolling 24 hours: crossing midnight UTC resets the total.
+    function test_limits_dailyResetsAtUtcMidnight() public {
+        _retailPairDailyOnly();
+
+        vm.warp(SOME_TIME);
+
+        vm.prank(ALICE);
+        cash.transfer(BOB, PER_DAY);
+        assertEq(cash.dailySpent(ALICE), PER_DAY);
+
+        // the first second of the next UTC day
+        vm.warp(_nextUtcMidnightAfter(SOME_TIME));
+        assertEq(cash.dailySpent(ALICE), 0, "stale day must read as zero");
+
+        vm.prank(ALICE);
+        cash.transfer(BOB, PER_DAY);
+        assertEq(cash.dailySpent(ALICE), PER_DAY);
+    }
+
+    /// @dev Section 4 states this openly: two days' allowance can be used either side of
+    ///      midnight, because that is two days' limits used on two days.
+    function test_limits_twiceTheCapAcrossMidnightIsIntended() public {
+        _retailPairDailyOnly();
+
+        uint256 lastSecond = _nextUtcMidnightAfter(SOME_TIME) - 1;
+        vm.warp(lastSecond);
+        vm.prank(ALICE);
+        cash.transfer(BOB, PER_DAY);
+
+        vm.warp(lastSecond + 1);
+        vm.prank(ALICE);
+        cash.transfer(BOB, PER_DAY);
+
+        assertEq(cash.balanceOf(BOB), 2 * PER_DAY);
+    }
+
+    function test_limits_areTrackedPerSenderNotGlobally() public {
+        _retailPairDailyOnly();
+        _approve(SETTLEMENT);
+        _fund(SETTLEMENT, 1_000e6);
+
+        vm.prank(ALICE);
+        cash.transfer(BOB, PER_DAY);
+
+        assertEq(cash.dailySpent(SETTLEMENT), 0);
+
+        vm.prank(SETTLEMENT);
+        cash.transfer(BOB, PER_DAY);
+
+        assertEq(cash.dailySpent(ALICE), PER_DAY);
+        assertEq(cash.dailySpent(SETTLEMENT), PER_DAY);
+    }
+
+    // -- NO_LIMIT and failing closed -----------------------------------------------------
+
+    function test_limits_noLimitTierIsUncapped() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, type(uint128).max);
+        _setLimits(Tier.RETAIL, cash.NO_LIMIT(), cash.NO_LIMIT());
+
+        vm.prank(ALICE);
+        cash.transfer(BOB, type(uint128).max);
+
+        assertEq(cash.balanceOf(BOB), type(uint128).max);
+    }
+
+    /// @dev An uncapped tier never pays for the accumulator it does not use.
+    function test_limits_noLimitSkipsTheAccumulator() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, 1_000e6);
+        _setLimits(Tier.RETAIL, cash.NO_LIMIT(), cash.NO_LIMIT());
+
+        vm.prank(ALICE);
+        cash.transfer(BOB, 100e6);
+
+        assertEq(cash.dailySpent(ALICE), 0, "no accumulator write for an uncapped tier");
+    }
+
+    /// @dev Zero means zero: an unconfigured tier blocks rather than silently uncapping.
+    function test_limits_unconfiguredTierFailsClosed() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+        _setLimits(Tier.RETAIL, 0, 0);
+
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.TransactionLimitExceeded.selector, ALICE, AMOUNT, 0));
+        vm.prank(ALICE);
+        cash.transfer(BOB, AMOUNT);
+    }
+
+    function test_limits_unsetTierReverts() public {
+        _approveWithoutTier(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.TierUnset.selector, ALICE));
+        vm.prank(ALICE);
+        cash.transfer(BOB, AMOUNT);
+    }
+
+    // -- supply paths ignore limits (section 3) ------------------------------------------
+
+    function test_limits_doNotApplyToMintOrBurn() public {
+        _approve(ALICE);
+        address issuer = _issuer();
+        _approve(issuer);
+        _setLimits(Tier.RETAIL, PER_TX, PER_DAY);
+
+        vm.prank(issuer);
+        cash.mint(ALICE, 10_000e6);
+
+        assertEq(cash.balanceOf(ALICE), 10_000e6);
+        assertEq(cash.dailySpent(ALICE), 0, "a mint consumes no allowance");
+
+        vm.prank(_officer());
+        cash.freeze(ALICE, REASON);
+        vm.prank(issuer);
+        cash.burnFrom(ALICE, 10_000e6, REASON);
+
+        assertEq(cash.totalSupply(), 0);
+    }
+
+    // -- setTierLimits (section 2, 4) ----------------------------------------------------
+
+    function test_setTierLimits_storesAndEmits() public {
+        vm.expectEmit(true, true, true, true);
+        emit TokenizedCash.TierLimitsSet(Tier.INSTITUTIONAL, PER_TX, PER_DAY, ADMIN);
+        _setLimits(Tier.INSTITUTIONAL, PER_TX, PER_DAY);
+
+        (uint256 perTx, uint256 perDay) = cash.tierLimits(Tier.INSTITUTIONAL);
+        assertEq(perTx, PER_TX);
+        assertEq(perDay, PER_DAY);
+    }
+
+    function test_setTierLimits_rejectsUnsetTier() public {
+        vm.expectRevert(TokenizedCash.CannotConfigureUnsetTier.selector);
+        vm.prank(ADMIN);
+        cash.setTierLimits(Tier.UNSET, PER_TX, PER_DAY);
+    }
+
+    /// @dev The daily cap must fit the uint216 accumulator, or the narrowing would truncate.
+    function test_setTierLimits_rejectsDailyCapAboveAccumulator() public {
+        uint256 tooLarge = uint256(type(uint216).max) + 1;
+
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.DailyLimitTooLarge.selector, tooLarge));
+        vm.prank(ADMIN);
+        cash.setTierLimits(Tier.RETAIL, PER_TX, tooLarge);
+    }
+
+    function test_setTierLimits_acceptsNoLimitAboveAccumulator() public {
+        _setLimits(Tier.RETAIL, cash.NO_LIMIT(), cash.NO_LIMIT());
+
+        (, uint256 perDay) = cash.tierLimits(Tier.RETAIL);
+        assertEq(perDay, cash.NO_LIMIT());
+    }
+
+    /// @dev Limit policy is admin's, not compliance's: bundling them would let one hot key
+    ///      raise every cap and silently disable the mechanism (section 2).
+    function test_setTierLimits_complianceOfficerCannotSetThem() public {
+        address officer = _officer();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, officer, adminRole)
+        );
+        vm.prank(officer);
+        cash.setTierLimits(Tier.RETAIL, PER_TX, PER_DAY);
+    }
+
+    function test_setTierLimits_requiresAdmin() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, STRANGER, adminRole)
+        );
+        vm.prank(STRANGER);
+        cash.setTierLimits(Tier.RETAIL, PER_TX, PER_DAY);
     }
 }

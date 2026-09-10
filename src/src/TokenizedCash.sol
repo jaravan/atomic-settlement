@@ -4,7 +4,7 @@ pragma solidity 0.8.30;
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {AccessControl} from "@openzeppelin/contracts/access/AccessControl.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
-import {IKYCRegistryV2} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
+import {IKYCRegistryV2, Tier} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
 
 /// @title TokenizedCash
 /// @notice The cash leg of an atomic DvP settlement: an ERC-20 representing commercial bank
@@ -25,6 +25,28 @@ contract TokenizedCash is ERC20, AccessControl, Pausable {
     bytes32 public constant PAUSER_ROLE = keccak256("PAUSER_ROLE");
 
     // ---------------------------------------------------------------------------------
+    // Limits (section 4)
+    // ---------------------------------------------------------------------------------
+
+    /// @notice A tier configured to this value is uncapped.
+    /// @dev The sentinel sits opposite the zero default so that forgetting to configure a
+    ///      tier blocks transfers rather than uncapping them: the contract fails closed.
+    uint256 public constant NO_LIMIT = type(uint256).max;
+
+    /// @notice The two caps that apply to a tier: one per transaction, one per calendar day.
+    struct TierLimits {
+        uint256 perTransaction;
+        uint256 perDay;
+    }
+
+    /// @notice A sender's running total for the current UTC day.
+    /// @dev Packs into one 256-bit slot; a uint40 day number outlasts any plausible chain.
+    struct DailyUsage {
+        uint40 day;
+        uint216 spent;
+    }
+
+    // ---------------------------------------------------------------------------------
     // Storage and immutables
     // ---------------------------------------------------------------------------------
 
@@ -41,6 +63,9 @@ contract TokenizedCash is ERC20, AccessControl, Pausable {
     /// @notice Whether an address is frozen. A frozen address cannot send, but can receive.
     mapping(address account => bool) public frozen;
 
+    mapping(Tier tier => TierLimits) private _limits;
+    mapping(address account => DailyUsage) private _usage;
+
     // ---------------------------------------------------------------------------------
     // Errors
     // ---------------------------------------------------------------------------------
@@ -53,6 +78,23 @@ contract TokenizedCash is ERC20, AccessControl, Pausable {
 
     /// @notice The sender is frozen. Frozen accounts can still receive.
     error SenderFrozen(address account);
+
+    /// @notice The sender has no tier, so no limit applies to it and it cannot transact.
+    /// @dev Falling back to the strictest tier would let an unclassified address transact at
+    ///      a limit nobody assigned it. "No tier" is an onboarding problem (section 4).
+    error TierUnset(address account);
+
+    /// @notice The transfer exceeds the sender's per-transaction cap.
+    error TransactionLimitExceeded(address account, uint256 value, uint256 limit);
+
+    /// @notice The transfer would take the sender past its cap for the current UTC day.
+    error DailyLimitExceeded(address account, uint256 value, uint256 spent, uint256 limit);
+
+    /// @notice The UNSET tier cannot be configured; it always refuses.
+    error CannotConfigureUnsetTier();
+
+    /// @notice A daily cap must fit the accumulator, or be NO_LIMIT.
+    error DailyLimitTooLarge(uint256 limit);
 
     /// @notice `burnFrom` was called on an account that has not been frozen first.
     /// @dev The frozen precondition is the whole control: destruction can only follow a
@@ -81,6 +123,9 @@ contract TokenizedCash is ERC20, AccessControl, Pausable {
 
     /// @notice Emitted when an issuer burns from its own balance.
     event Burned(address indexed from, uint256 value, address indexed issuer);
+
+    /// @notice Emitted when a tier's caps change. The whole policy is three of these.
+    event TierLimitsSet(Tier indexed tier, uint256 perTransaction, uint256 perDay, address indexed by);
 
     /// @notice Emitted when an issuer burns from a frozen holder that has not consented.
     /// @dev Distinct from `Burned` so a seizure is never mistaken for a redemption.
@@ -140,6 +185,9 @@ contract TokenizedCash is ERC20, AccessControl, Pausable {
         if (from != address(0) && to != address(0)) {
             if (!registry.isApproved(from)) revert NotApproved(from);
             if (frozen[from]) revert SenderFrozen(from);
+
+            (bool accumulate, uint216 newSpent) = _checkLimits(from, value);
+            if (accumulate) _usage[from] = DailyUsage({day: _today(), spent: newSpent});
         }
 
         // Also covers the mint recipient.
@@ -209,5 +257,66 @@ contract TokenizedCash is ERC20, AccessControl, Pausable {
         if (!frozen[account]) revert AccountNotFrozen(account);
         _burn(account, value);
         emit ForcedBurn(account, value, reason, msg.sender);
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Limit policy (section 4)
+    // ---------------------------------------------------------------------------------
+
+    /// @dev Both caps for the sender's tier, reading tierOf exactly once.
+    /// @return accumulate Whether the sender's daily total needs writing back.
+    /// @return newSpent The total to write, valid only when `accumulate` is true.
+    function _checkLimits(address from, uint256 value) private view returns (bool accumulate, uint216 newSpent) {
+        Tier tier = registry.tierOf(from);
+        if (tier == Tier.UNSET) revert TierUnset(from);
+
+        TierLimits memory limits = _limits[tier];
+
+        if (limits.perTransaction != NO_LIMIT && value > limits.perTransaction) {
+            revert TransactionLimitExceeded(from, value, limits.perTransaction);
+        }
+
+        // An uncapped tier skips both the comparison and the storage write, so it never pays
+        // for an accumulator it does not use.
+        if (limits.perDay == NO_LIMIT) return (false, 0);
+
+        // A fixed calendar-day window: if the stored day is not today, the total resets.
+        DailyUsage memory usage = _usage[from];
+        uint256 spent = usage.day == _today() ? usage.spent : 0;
+
+        uint256 total = spent + value;
+        if (total > limits.perDay) revert DailyLimitExceeded(from, value, spent, limits.perDay);
+
+        // Safe to narrow: total <= perDay, and setTierLimits refuses a perDay above the range.
+        return (true, uint216(total));
+    }
+
+    /// @dev Days since the Unix epoch, so the window rolls at 00:00 UTC for every holder.
+    function _today() private view returns (uint40) {
+        return uint40(block.timestamp / 1 days);
+    }
+
+    /// @notice Set both caps for a tier. Either may be NO_LIMIT.
+    /// @dev Takes a Tier, never an address: the entire policy is three entries, readable in
+    ///      full, where per-address overrides would scatter it across holders (section 4).
+    function setTierLimits(Tier tier, uint256 perTransaction, uint256 perDay) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (tier == Tier.UNSET) revert CannotConfigureUnsetTier();
+        if (perDay != NO_LIMIT && perDay > type(uint216).max) revert DailyLimitTooLarge(perDay);
+
+        _limits[tier] = TierLimits({perTransaction: perTransaction, perDay: perDay});
+        emit TierLimitsSet(tier, perTransaction, perDay, msg.sender);
+    }
+
+    /// @notice The caps configured for a tier. Zero on both means the tier cannot transact.
+    function tierLimits(Tier tier) external view returns (uint256 perTransaction, uint256 perDay) {
+        TierLimits memory limits = _limits[tier];
+        return (limits.perTransaction, limits.perDay);
+    }
+
+    /// @notice How much an address has already sent during the current UTC day.
+    /// @dev Reports zero once the stored day is stale, which is what the next transfer sees.
+    function dailySpent(address account) external view returns (uint256) {
+        DailyUsage memory usage = _usage[account];
+        return usage.day == _today() ? usage.spent : 0;
     }
 }
