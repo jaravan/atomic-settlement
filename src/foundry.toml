@@ -3,4 +3,16 @@ src = "src"
 out = "out"
 libs = ["lib"]
 
+# Pinned rather than floating: both token designs reason about OpenZeppelin v5.6.1
+# semantics -- _update is the only virtual hook on the transfer path -- and a moving
+# compiler under a pinned dependency defeats the point of pinning the dependency.
+solc = "0.8.30"
+
+# Cancun gives us transient storage (EIP-1153) for the asset leg's _forcing flag.
+# Besu supports it from 24.x.
+evm_version = "cancun"
+
+[profile.ci]
+verbosity = 3
+
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
