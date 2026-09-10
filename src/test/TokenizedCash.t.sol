@@ -4,11 +4,14 @@ pragma solidity 0.8.30;
 import {Test} from "forge-std/Test.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IKYCRegistryV2, Tier} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
 import {TokenizedCash} from "../src/TokenizedCash.sol";
 import {MockKYCRegistry} from "./mocks/MockKYCRegistry.sol";
 
-/// @notice Steps 1-6: construction, roles, the registry gate, freeze, pause, supply and limits.
+/// @notice Steps 1-7: construction, roles, the registry gate, freeze, pause, supply, limits
+///         and the transfer previews.
 contract TokenizedCashTest is Test {
     TokenizedCash internal cash;
     MockKYCRegistry internal registry;
@@ -1063,5 +1066,205 @@ contract TokenizedCashTest is Test {
         );
         vm.prank(STRANGER);
         cash.setTierLimits(Tier.RETAIL, PER_TX, PER_DAY);
+    }
+
+    // -- previewing the checks (section 3) -----------------------------------------------
+
+    function _selectorOf(bytes memory err) private pure returns (bytes4 selector) {
+        assembly {
+            selector := mload(add(err, 0x20))
+        }
+    }
+
+    /// @dev The property the previews exist for: whatever `canTransfer` reports is exactly
+    ///      what the real call reverts with. Runs both and compares.
+    function _assertPreviewMatchesReality(address from, address to, uint256 value) private {
+        (bool ok, bytes4 reason) = cash.canTransfer(from, to, value);
+
+        vm.prank(from);
+        (bool succeeded, bytes memory err) =
+            address(cash).call(abi.encodeWithSelector(IERC20.transfer.selector, to, value));
+
+        assertEq(succeeded, ok, "preview disagreed on whether the call would succeed");
+        if (!ok) assertEq(_selectorOf(err), reason, "preview named a different error");
+    }
+
+    function test_canTransfer_trueWhenEverythingPasses() public {
+        _retailPair();
+
+        (bool ok, bytes4 reason) = cash.canTransfer(ALICE, BOB, PER_TX);
+
+        assertTrue(ok);
+        assertEq(reason, bytes4(0));
+    }
+
+    function test_canTransfer_reportsUnapprovedSender() public {
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        (bool ok, bytes4 reason) = cash.canTransfer(ALICE, BOB, AMOUNT);
+
+        assertFalse(ok);
+        assertEq(reason, TokenizedCash.NotApproved.selector);
+        _assertPreviewMatchesReality(ALICE, BOB, AMOUNT);
+    }
+
+    function test_canTransfer_reportsFrozenSender() public {
+        _retailPair();
+        vm.prank(_officer());
+        cash.freeze(ALICE, REASON);
+
+        (bool ok, bytes4 reason) = cash.canTransfer(ALICE, BOB, PER_TX);
+
+        assertFalse(ok);
+        assertEq(reason, TokenizedCash.SenderFrozen.selector);
+        _assertPreviewMatchesReality(ALICE, BOB, PER_TX);
+    }
+
+    function test_canTransfer_reportsTransactionLimit() public {
+        _retailPair();
+
+        (bool ok, bytes4 reason) = cash.canTransfer(ALICE, BOB, PER_TX + 1);
+
+        assertFalse(ok);
+        assertEq(reason, TokenizedCash.TransactionLimitExceeded.selector);
+        _assertPreviewMatchesReality(ALICE, BOB, PER_TX + 1);
+    }
+
+    function test_canTransfer_reportsDailyLimit() public {
+        _retailPairDailyOnly();
+
+        vm.prank(ALICE);
+        cash.transfer(BOB, PER_DAY);
+
+        (bool ok, bytes4 reason) = cash.canTransfer(ALICE, BOB, 1);
+
+        assertFalse(ok);
+        assertEq(reason, TokenizedCash.DailyLimitExceeded.selector);
+        _assertPreviewMatchesReality(ALICE, BOB, 1);
+    }
+
+    function test_canTransfer_reportsUnsetTier() public {
+        _approveWithoutTier(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        (bool ok, bytes4 reason) = cash.canTransfer(ALICE, BOB, AMOUNT);
+
+        assertFalse(ok);
+        assertEq(reason, TokenizedCash.TierUnset.selector);
+        _assertPreviewMatchesReality(ALICE, BOB, AMOUNT);
+    }
+
+    function test_canTransfer_reportsPause() public {
+        _retailPair();
+        vm.prank(_pauser());
+        cash.pause();
+
+        (bool ok, bytes4 reason) = cash.canTransfer(ALICE, BOB, PER_TX);
+
+        assertFalse(ok);
+        assertEq(reason, Pausable.EnforcedPause.selector);
+        _assertPreviewMatchesReality(ALICE, BOB, PER_TX);
+    }
+
+    /// @dev Not a compliance failure: the preview answers the whole question (section 3).
+    function test_canTransfer_reportsInsufficientBalance() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _setLimits(Tier.RETAIL, cash.NO_LIMIT(), cash.NO_LIMIT());
+
+        (bool ok, bytes4 reason) = cash.canTransfer(ALICE, BOB, AMOUNT);
+
+        assertFalse(ok);
+        assertEq(reason, IERC20Errors.ERC20InsufficientBalance.selector);
+        _assertPreviewMatchesReality(ALICE, BOB, AMOUNT);
+    }
+
+    /// @dev A view over state that can change next block: it must not write anything.
+    function test_canTransfer_doesNotMutateState() public {
+        _retailPair();
+
+        cash.canTransfer(ALICE, BOB, PER_TX);
+
+        assertEq(cash.dailySpent(ALICE), 0, "a preview must not consume allowance");
+        assertEq(cash.balanceOf(ALICE), 1_000e6);
+    }
+
+    // -- canTransferFrom ------------------------------------------------------------------
+
+    function test_canTransferFrom_trueForUnapprovedSpender() public {
+        _retailPair();
+        vm.prank(ALICE);
+        cash.approve(SETTLEMENT, PER_TX);
+
+        assertFalse(registry.isApproved(SETTLEMENT));
+
+        (bool ok, bytes4 reason) = cash.canTransferFrom(SETTLEMENT, ALICE, BOB, PER_TX);
+
+        assertTrue(ok, "a settlement contract must preview as able to move cash");
+        assertEq(reason, bytes4(0));
+    }
+
+    function test_canTransferFrom_reportsSanctionedSpender() public {
+        _retailPair();
+        vm.prank(ALICE);
+        cash.approve(SETTLEMENT, PER_TX);
+        registry.setSanctioned(SETTLEMENT, true);
+
+        (bool ok, bytes4 reason) = cash.canTransferFrom(SETTLEMENT, ALICE, BOB, PER_TX);
+
+        assertFalse(ok);
+        assertEq(reason, TokenizedCash.SpenderSanctioned.selector);
+    }
+
+    function test_canTransferFrom_reportsMissingAllowance() public {
+        _retailPair();
+
+        (bool ok, bytes4 reason) = cash.canTransferFrom(SETTLEMENT, ALICE, BOB, PER_TX);
+
+        assertFalse(ok);
+        assertEq(reason, IERC20Errors.ERC20InsufficientAllowance.selector);
+    }
+
+    /// @dev The spender check precedes the allowance check, mirroring the real call.
+    function test_canTransferFrom_sanctionsOutrankMissingAllowance() public {
+        _retailPair();
+        registry.setSanctioned(SETTLEMENT, true);
+
+        assertEq(cash.allowance(ALICE, SETTLEMENT), 0);
+
+        (, bytes4 reason) = cash.canTransferFrom(SETTLEMENT, ALICE, BOB, PER_TX);
+
+        assertEq(reason, TokenizedCash.SpenderSanctioned.selector);
+    }
+
+    function test_canTransferFrom_stillReportsSenderSideFailures() public {
+        _retailPair();
+        vm.prank(ALICE);
+        cash.approve(SETTLEMENT, PER_TX);
+        vm.prank(_officer());
+        cash.freeze(ALICE, REASON);
+
+        (bool ok, bytes4 reason) = cash.canTransferFrom(SETTLEMENT, ALICE, BOB, PER_TX);
+
+        assertFalse(ok);
+        assertEq(reason, TokenizedCash.SenderFrozen.selector);
+    }
+
+    // -- the preview machinery itself -----------------------------------------------------
+
+    function test_previewTransfer_revertsWithTheRealError() public {
+        _retailPair();
+        vm.prank(_officer());
+        cash.freeze(ALICE, REASON);
+
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.SenderFrozen.selector, ALICE));
+        cash.previewTransfer(ALICE, BOB, PER_TX);
+    }
+
+    function test_previewTransfer_returnsQuietlyWhenItWouldSucceed() public {
+        _retailPair();
+        cash.previewTransfer(ALICE, BOB, PER_TX);
     }
 }

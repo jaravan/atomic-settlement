@@ -178,24 +178,97 @@ contract TokenizedCash is ERC20, AccessControl, Pausable {
 
     /// @dev The one place every transfer, mint and burn passes through: in OpenZeppelin
     ///      v5.6.1 _update is the only virtual hook on the transfer path.
-    /// @dev whenNotPaused here covers transfers, mints and burns in one place (section 6).
-    function _update(address from, address to, uint256 value) internal override whenNotPaused {
+    function _update(address from, address to, uint256 value) internal override {
+        (bool accumulate, uint216 newSpent) = _checkTransfer(from, to, value);
+        if (accumulate) _usage[from] = DailyUsage({day: _today(), spent: newSpent});
+        super._update(from, to, value);
+    }
+
+    /// @dev The single predicate. Reverts with the exact error the caller should see, and
+    ///      returns what _update needs so that tierOf is read once rather than twice.
+    /// @return accumulate Whether the sender's daily total needs writing back.
+    /// @return newSpent The total to write, valid only when `accumulate` is true.
+    function _checkTransfer(address from, address to, uint256 value)
+        private
+        view
+        returns (bool accumulate, uint216 newSpent)
+    {
+        if (paused()) revert EnforcedPause();
+
         // A burn (to == 0) delivers to nobody, so the sender side is not guarded: there is
         // no counterparty to protect, and it is what makes burnFrom possible (section 3).
         if (from != address(0) && to != address(0)) {
             if (!registry.isApproved(from)) revert NotApproved(from);
             if (frozen[from]) revert SenderFrozen(from);
+            (accumulate, newSpent) = _checkLimits(from, value);
 
-            (bool accumulate, uint216 newSpent) = _checkLimits(from, value);
-            if (accumulate) _usage[from] = DailyUsage({day: _today(), spent: newSpent});
+            // Included so a preview answers the whole question, not the compliance half.
+            uint256 balance = balanceOf(from);
+            if (balance < value) revert ERC20InsufficientBalance(from, balance, value);
         }
 
         // Also covers the mint recipient.
         if (to != address(0)) {
             if (!registry.isApproved(to)) revert NotApproved(to);
         }
+    }
 
-        super._update(from, to, value);
+    // ---------------------------------------------------------------------------------
+    // Previewing the checks (section 3)
+    // ---------------------------------------------------------------------------------
+
+    /// @notice Whether a direct `transfer` would succeed right now.
+    /// @return ok True if it would go through.
+    /// @return reason The selector of the error it would revert with, or 0 when `ok`.
+    function canTransfer(address from, address to, uint256 value) external view returns (bool ok, bytes4 reason) {
+        try this.previewTransfer(from, to, value) {
+            return (true, bytes4(0));
+        } catch (bytes memory err) {
+            return (false, _selectorOf(err));
+        }
+    }
+
+    /// @notice Whether a `transferFrom` would succeed right now.
+    /// @dev Separate from `canTransfer` because only this path has a spender and an
+    ///      allowance, so a caller asking about a plain payment invents neither.
+    /// @return ok True if it would go through.
+    /// @return reason The selector of the error it would revert with, or 0 when `ok`.
+    function canTransferFrom(address spender, address from, address to, uint256 value)
+        external
+        view
+        returns (bool ok, bytes4 reason)
+    {
+        try this.previewTransferFrom(spender, from, to, value) {
+            return (true, bytes4(0));
+        } catch (bytes memory err) {
+            return (false, _selectorOf(err));
+        }
+    }
+
+    /// @notice Reverts with the error a real `transfer` would.
+    /// @dev Machinery for `canTransfer`. Running the predicate rather than reimplementing it
+    ///      is what makes `reason` correct by construction rather than by convention.
+    function previewTransfer(address from, address to, uint256 value) external view {
+        _checkTransfer(from, to, value);
+    }
+
+    /// @notice Reverts with the error a real `transferFrom` would.
+    /// @dev Checks run in the order the real call makes them: spender, allowance, transfer.
+    function previewTransferFrom(address spender, address from, address to, uint256 value) external view {
+        if (registry.isSanctioned(spender)) revert SpenderSanctioned(spender);
+
+        uint256 allowed = allowance(from, spender);
+        if (allowed < value) revert ERC20InsufficientAllowance(spender, allowed, value);
+
+        _checkTransfer(from, to, value);
+    }
+
+    /// @dev The leading four bytes of returndata, or zero if there are not four to take.
+    function _selectorOf(bytes memory err) private pure returns (bytes4 selector) {
+        if (err.length < 4) return bytes4(0);
+        assembly ("memory-safe") {
+            selector := mload(add(err, 0x20))
+        }
     }
 
     // ---------------------------------------------------------------------------------
