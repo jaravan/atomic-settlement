@@ -5,16 +5,19 @@ import {Test} from "forge-std/Test.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {IKYCRegistryV2} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
 import {TokenizedCash} from "../src/TokenizedCash.sol";
+import {MockKYCRegistry} from "./mocks/MockKYCRegistry.sol";
 
-/// @notice Step 1: construction, immutables, roles and denomination.
+/// @notice Steps 1-2: construction, roles, denomination, and the registry gate.
 contract TokenizedCashTest is Test {
     TokenizedCash internal cash;
-
-    IKYCRegistryV2 internal constant REGISTRY = IKYCRegistryV2(address(0xCEC15));
+    MockKYCRegistry internal registry;
     address internal constant ADMIN = address(0xA11CE);
     address internal constant ISSUER = address(0x155);
     address internal constant OFFICER = address(0x0FF);
     address internal constant STRANGER = address(0x5747);
+    address internal constant ALICE = address(0xA11);
+    address internal constant BOB = address(0xB0B);
+    address internal constant SETTLEMENT = address(0x5E77);
 
     bytes3 internal constant EUR = bytes3("EUR");
 
@@ -26,7 +29,8 @@ contract TokenizedCashTest is Test {
     bytes32 internal pauserRole;
 
     function setUp() public {
-        cash = new TokenizedCash("Tokenized Euro", "tEUR", EUR, REGISTRY, ADMIN);
+        registry = new MockKYCRegistry();
+        cash = new TokenizedCash("Tokenized Euro", "tEUR", EUR, IKYCRegistryV2(address(registry)), ADMIN);
 
         adminRole = cash.DEFAULT_ADMIN_ROLE();
         issuerRole = cash.ISSUER_ROLE();
@@ -42,7 +46,7 @@ contract TokenizedCashTest is Test {
     }
 
     function test_constructor_setsImmutables() public view {
-        assertEq(address(cash.registry()), address(REGISTRY));
+        assertEq(address(cash.registry()), address(registry));
         assertEq(cash.currency(), EUR);
     }
 
@@ -57,12 +61,12 @@ contract TokenizedCashTest is Test {
 
     function test_constructor_revertsOnZeroAdmin() public {
         vm.expectRevert(TokenizedCash.InvalidConfiguration.selector);
-        new TokenizedCash("Tokenized Euro", "tEUR", EUR, REGISTRY, address(0));
+        new TokenizedCash("Tokenized Euro", "tEUR", EUR, IKYCRegistryV2(address(registry)), address(0));
     }
 
     function test_constructor_revertsOnZeroCurrency() public {
         vm.expectRevert(TokenizedCash.InvalidConfiguration.selector);
-        new TokenizedCash("Tokenized Euro", "tEUR", bytes3(0), REGISTRY, ADMIN);
+        new TokenizedCash("Tokenized Euro", "tEUR", bytes3(0), IKYCRegistryV2(address(registry)), ADMIN);
     }
 
     // -- denomination (section 8) --------------------------------------------------------
@@ -132,5 +136,131 @@ contract TokenizedCashTest is Test {
         cash.grantRole(issuerRole, ADMIN);
 
         assertTrue(cash.hasRole(issuerRole, ADMIN));
+    }
+
+    // -- the registry gate (sections 1, 3) -----------------------------------------------
+
+    uint256 internal constant AMOUNT = 100e6;
+
+    /// @dev Balances are written directly: mint arrives in step 5.
+    function _fund(address who, uint256 amount) private {
+        deal(address(cash), who, amount, true);
+    }
+
+    function _approve(address who) private {
+        registry.setApproved(who, true);
+    }
+
+    function test_transfer_succeedsWhenBothApproved() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(ALICE);
+        cash.transfer(BOB, AMOUNT);
+
+        assertEq(cash.balanceOf(ALICE), 0);
+        assertEq(cash.balanceOf(BOB), AMOUNT);
+    }
+
+    function test_transfer_revertsWhenSenderNotApproved() public {
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.NotApproved.selector, ALICE));
+        vm.prank(ALICE);
+        cash.transfer(BOB, AMOUNT);
+    }
+
+    function test_transfer_revertsWhenRecipientNotApproved() public {
+        _approve(ALICE);
+        _fund(ALICE, AMOUNT);
+
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.NotApproved.selector, BOB));
+        vm.prank(ALICE);
+        cash.transfer(BOB, AMOUNT);
+    }
+
+    /// @dev A sanctioned holder fails isApproved, so it is stopped as an unapproved sender
+    ///      rather than by a separate sanctions check (section 3).
+    function test_transfer_revertsWhenSenderSanctioned() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+        registry.setSanctioned(ALICE, true);
+
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.NotApproved.selector, ALICE));
+        vm.prank(ALICE);
+        cash.transfer(BOB, AMOUNT);
+    }
+
+    function test_transfer_gatesZeroValue() public {
+        _approve(ALICE);
+        _fund(ALICE, AMOUNT);
+
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.NotApproved.selector, BOB));
+        vm.prank(ALICE);
+        cash.transfer(BOB, 0);
+    }
+
+    // -- transferFrom: the spender (section 3) -------------------------------------------
+
+    /// @dev The property the whole settlement design rests on: the spender is never asked
+    ///      to be isApproved, because a contract can never be.
+    function test_transferFrom_spenderNeedNotBeApproved() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(ALICE);
+        cash.approve(SETTLEMENT, AMOUNT);
+
+        assertFalse(registry.isApproved(SETTLEMENT), "settlement contract is deliberately unapproved");
+
+        vm.prank(SETTLEMENT);
+        cash.transferFrom(ALICE, BOB, AMOUNT);
+
+        assertEq(cash.balanceOf(BOB), AMOUNT);
+    }
+
+    function test_transferFrom_revertsWhenSpenderSanctioned() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+        registry.setSanctioned(SETTLEMENT, true);
+
+        vm.prank(ALICE);
+        cash.approve(SETTLEMENT, AMOUNT);
+
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.SpenderSanctioned.selector, SETTLEMENT));
+        vm.prank(SETTLEMENT);
+        cash.transferFrom(ALICE, BOB, AMOUNT);
+    }
+
+    /// @dev The spender check runs before the allowance is consulted, so a sanctioned
+    ///      spender is named as sanctioned rather than as merely unapproved for the amount.
+    function test_transferFrom_spenderCheckPrecedesAllowance() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+        registry.setSanctioned(SETTLEMENT, true);
+
+        assertEq(cash.allowance(ALICE, SETTLEMENT), 0);
+
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.SpenderSanctioned.selector, SETTLEMENT));
+        vm.prank(SETTLEMENT);
+        cash.transferFrom(ALICE, BOB, AMOUNT);
+    }
+
+    function test_transferFrom_stillGatesBothParties() public {
+        _approve(ALICE);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(ALICE);
+        cash.approve(SETTLEMENT, AMOUNT);
+
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.NotApproved.selector, BOB));
+        vm.prank(SETTLEMENT);
+        cash.transferFrom(ALICE, BOB, AMOUNT);
     }
 }
