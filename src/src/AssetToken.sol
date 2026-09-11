@@ -71,6 +71,12 @@ contract AssetToken is ERC20, AccessControl, Pausable {
     /// @notice Emitted on unfreeze, carrying the same enumerated code.
     event AccountUnfrozen(address indexed account, bytes32 reason, address indexed by);
 
+    /// @notice Emitted at issuance. Every supply change is attributed to the acting issuer.
+    event Minted(address indexed to, uint256 value, address indexed issuer);
+
+    /// @notice Emitted at redemption, from the issuer's own balance.
+    event Burned(address indexed from, uint256 value, address indexed issuer);
+
     // ---------------------------------------------------------------------------------
     // Construction
     // ---------------------------------------------------------------------------------
@@ -167,5 +173,24 @@ contract AssetToken is ERC20, AccessControl, Pausable {
     /// @notice Resume.
     function unpause() external onlyRole(PAUSER_ROLE) {
         _unpause();
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Issuance and redemption (section 7)
+    // ---------------------------------------------------------------------------------
+
+    /// @notice Issuance. For a bond this normally happens once, to the arranger or the
+    ///         initial allottees. The recipient must be approved.
+    function mint(address to, uint256 value) external onlyRole(ISSUER_ROLE) {
+        _mint(to, value);
+        emit Minted(to, value, msg.sender);
+    }
+
+    /// @notice Redemption: takes from the issuer's own balance only.
+    /// @dev The holder delivers the bond to the issuer and the issuer burns it. There is no
+    ///      burnFrom; a non-cooperative redemption is forceTransfer then burn (section 8).
+    function burn(uint256 value) external onlyRole(ISSUER_ROLE) {
+        _burn(msg.sender, value);
+        emit Burned(msg.sender, value, msg.sender);
     }
 }

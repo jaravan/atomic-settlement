@@ -4,11 +4,13 @@ pragma solidity 0.8.30;
 import {Test} from "forge-std/Test.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
+import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 import {IKYCRegistryV2} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
 import {AssetToken} from "../src/AssetToken.sol";
 import {MockKYCRegistry} from "./mocks/MockKYCRegistry.sol";
 
-/// @notice Steps 1-4: construction, roles, denomination, the registry gate, freeze and pause.
+/// @notice Steps 1-5: construction, roles, denomination, the registry gate, freeze, pause and
+///         issuance.
 contract AssetTokenTest is Test {
     AssetToken internal bond;
     MockKYCRegistry internal registry;
@@ -559,5 +561,138 @@ contract AssetTokenTest is Test {
         );
         vm.prank(officer);
         bond.pause();
+    }
+
+    // -- issuance and redemption (section 7) ---------------------------------------------
+
+    /// @dev A wholesale issue: 1,000 bonds of EUR 100,000 nominal.
+    uint256 internal constant ISSUE_SIZE = 1_000;
+
+    function _issuer() private returns (address) {
+        vm.prank(ADMIN);
+        bond.grantRole(issuerRole, ISSUER);
+        return ISSUER;
+    }
+
+    function test_mint_issuesToApprovedRecipient() public {
+        _approve(ALICE);
+
+        vm.prank(_issuer());
+        bond.mint(ALICE, ISSUE_SIZE);
+
+        assertEq(bond.balanceOf(ALICE), ISSUE_SIZE);
+        assertEq(bond.totalSupply(), ISSUE_SIZE);
+    }
+
+    /// @dev Closes the gap left by step 2: the `to` branch of _update on the mint path.
+    function test_mint_revertsForUnapprovedRecipient() public {
+        address issuer = _issuer();
+
+        vm.expectRevert(abi.encodeWithSelector(AssetToken.NotApproved.selector, ALICE));
+        vm.prank(issuer);
+        bond.mint(ALICE, ISSUE_SIZE);
+    }
+
+    function test_mint_emitsAttributedEvent() public {
+        _approve(ALICE);
+        address issuer = _issuer();
+
+        vm.expectEmit(true, true, true, true);
+        emit AssetToken.Minted(ALICE, ISSUE_SIZE, issuer);
+        vm.prank(issuer);
+        bond.mint(ALICE, ISSUE_SIZE);
+    }
+
+    function test_mint_requiresIssuerRole() public {
+        _approve(ALICE);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, STRANGER, issuerRole)
+        );
+        vm.prank(STRANGER);
+        bond.mint(ALICE, ISSUE_SIZE);
+    }
+
+    function test_mint_blockedWhilePaused() public {
+        _approve(ALICE);
+        address issuer = _issuer();
+
+        vm.prank(_pauser());
+        bond.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(issuer);
+        bond.mint(ALICE, ISSUE_SIZE);
+    }
+
+    // -- burn ----------------------------------------------------------------------------
+
+    /// @dev Redemption at maturity: the whole issue comes back to the issuer and is burned.
+    function test_burn_redeemsFromIssuerOwnBalance() public {
+        address issuer = _issuer();
+        _approve(issuer);
+        _approve(ALICE);
+
+        vm.prank(issuer);
+        bond.mint(ALICE, ISSUE_SIZE);
+
+        // the holder delivers the bonds back
+        vm.prank(ALICE);
+        bond.transfer(issuer, ISSUE_SIZE);
+
+        vm.expectEmit(true, true, true, true);
+        emit AssetToken.Burned(issuer, ISSUE_SIZE, issuer);
+        vm.prank(issuer);
+        bond.burn(ISSUE_SIZE);
+
+        assertEq(bond.totalSupply(), 0);
+    }
+
+    function test_burn_requiresIssuerRole() public {
+        _fund(STRANGER, AMOUNT);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, STRANGER, issuerRole)
+        );
+        vm.prank(STRANGER);
+        bond.burn(AMOUNT);
+    }
+
+    function test_burn_blockedWhilePaused() public {
+        address issuer = _issuer();
+        _approve(issuer);
+        vm.prank(issuer);
+        bond.mint(issuer, AMOUNT);
+
+        vm.prank(_pauser());
+        bond.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(issuer);
+        bond.burn(AMOUNT);
+    }
+
+    /// @dev The invariant section 7 asks to be tested: because a burn skips the sender-side
+    ///      checks, ISSUER_ROLE is the whole of the protection on balances. And there is no
+    ///      burnFrom at all, so even the issuer cannot burn what it does not hold.
+    function test_noPathReducesAnotherHoldersBalance() public {
+        _approve(ALICE);
+        address issuer = _issuer();
+        vm.prank(issuer);
+        bond.mint(ALICE, ISSUE_SIZE);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, STRANGER, issuerRole)
+        );
+        vm.prank(STRANGER);
+        bond.burn(ISSUE_SIZE);
+
+        // the issuer holds nothing, so its own burn path has nothing to take
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InsufficientBalance.selector, issuer, 0, ISSUE_SIZE));
+        vm.prank(issuer);
+        bond.burn(ISSUE_SIZE);
+
+        assertEq(bond.balanceOf(ALICE), ISSUE_SIZE);
+        assertEq(bond.totalSupply(), ISSUE_SIZE);
     }
 }
