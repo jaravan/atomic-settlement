@@ -4,7 +4,7 @@ pragma solidity 0.8.30;
 import {Test} from "forge-std/Test.sol";
 import {DvPSettlement} from "../src/DvPSettlement.sol";
 
-/// @notice Step 1: recording a proposal.
+/// @notice Steps 1-2: recording and withdrawing a proposal.
 contract DvPSettlementTest is Test {
     DvPSettlement internal dvp;
 
@@ -195,5 +195,111 @@ contract DvPSettlementTest is Test {
         vm.expectRevert(abi.encodeWithSelector(DvPSettlement.DeadlineNotInFuture.selector, uint64(0)));
         vm.prank(SELLER);
         dvp.propose(t);
+    }
+
+    // -- cancel (section 3) --------------------------------------------------------------
+
+    function _proposed() private returns (uint256 id) {
+        vm.prank(SELLER);
+        id = dvp.propose(_terms());
+    }
+
+    function test_cancel_marksTradeCancelled() public {
+        uint256 id = _proposed();
+
+        vm.prank(SELLER);
+        dvp.cancel(id);
+
+        assertEq(uint8(dvp.trades(id).status), uint8(DvPSettlement.Status.CANCELLED));
+    }
+
+    /// @dev Both parties indexed: the buyer is the party a withdrawn offer actually affects,
+    ///      so it must be able to find one addressed to it (section 8).
+    function test_cancel_emitsEventNamingBothParties() public {
+        uint256 id = _proposed();
+
+        vm.expectEmit(true, true, true, true);
+        emit DvPSettlement.TradeCancelled(id, SELLER, BUYER);
+        vm.prank(SELLER);
+        dvp.cancel(id);
+    }
+
+    /// @dev The record survives: cancelled is a terminal status, not a deletion.
+    function test_cancel_leavesTermsReadable() public {
+        uint256 id = _proposed();
+        vm.prank(SELLER);
+        dvp.cancel(id);
+
+        DvPSettlement.Trade memory t = dvp.trades(id);
+        assertEq(t.seller, SELLER);
+        assertEq(t.cashAmount, CASH_AMOUNT);
+    }
+
+    // -- only the seller -----------------------------------------------------------------
+
+    function test_cancel_buyerCannot() public {
+        uint256 id = _proposed();
+
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.NotSeller.selector, id, BUYER));
+        vm.prank(BUYER);
+        dvp.cancel(id);
+    }
+
+    function test_cancel_strangerCannot() public {
+        uint256 id = _proposed();
+
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.NotSeller.selector, id, STRANGER));
+        vm.prank(STRANGER);
+        dvp.cancel(id);
+    }
+
+    // -- only while PROPOSED -------------------------------------------------------------
+
+    function test_cancel_twiceReverts() public {
+        uint256 id = _proposed();
+        vm.prank(SELLER);
+        dvp.cancel(id);
+
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.TradeNotOpen.selector, id, DvPSettlement.Status.CANCELLED));
+        vm.prank(SELLER);
+        dvp.cancel(id);
+    }
+
+    function test_cancel_unassignedIdReverts() public {
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.TradeNotOpen.selector, 42, DvPSettlement.Status.NONE));
+        vm.prank(SELLER);
+        dvp.cancel(42);
+    }
+
+    /// @dev The status check comes first, so a stranger probing an unassigned id learns it
+    ///      is unassigned rather than being told it is not the seller of nothing.
+    function test_cancel_statusCheckPrecedesSellerCheck() public {
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.TradeNotOpen.selector, 42, DvPSettlement.Status.NONE));
+        vm.prank(STRANGER);
+        dvp.cancel(42);
+    }
+
+    /// @dev Expiry is not a status. A seller can still cancel a lapsed proposal; it changes
+    ///      nothing anyone could act on, but it is not refused (section 4).
+    function test_cancel_expiredProposalIsAllowed() public {
+        uint256 id = _proposed();
+        vm.warp(uint256(deadline) + 1);
+
+        vm.prank(SELLER);
+        dvp.cancel(id);
+
+        assertEq(uint8(dvp.trades(id).status), uint8(DvPSettlement.Status.CANCELLED));
+    }
+
+    /// @dev One seller's cancel touches one trade, not every open proposal it has.
+    function test_cancel_isPerTrade() public {
+        vm.startPrank(SELLER);
+        uint256 a = dvp.propose(_terms());
+        uint256 b = dvp.propose(_terms());
+        dvp.cancel(a);
+        vm.stopPrank();
+
+        assertEq(uint8(dvp.trades(a).status), uint8(DvPSettlement.Status.CANCELLED));
+        assertEq(uint8(dvp.trades(b).status), uint8(DvPSettlement.Status.PROPOSED));
     }
 }

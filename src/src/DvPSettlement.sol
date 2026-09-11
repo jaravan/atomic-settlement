@@ -67,6 +67,12 @@ contract DvPSettlement {
     /// @notice The deadline is not in the future. There are no open-ended proposals.
     error DeadlineNotInFuture(uint64 deadline);
 
+    /// @notice The trade is not PROPOSED: never assigned, already settled, or cancelled.
+    error TradeNotOpen(uint256 tradeId, Status status);
+
+    /// @notice The caller is not the party the action belongs to.
+    error NotSeller(uint256 tradeId, address caller);
+
     // ---------------------------------------------------------------------------------
     // Events (section 8)
     // ---------------------------------------------------------------------------------
@@ -82,6 +88,10 @@ contract DvPSettlement {
         uint256 assetAmount,
         uint64 deadline
     );
+
+    /// @notice The seller withdrew its instruction. No reason: a party withdrawing its own
+    ///         offer owes the log no justification (section 8).
+    event TradeCancelled(uint256 indexed tradeId, address indexed seller, address indexed buyer);
 
     // ---------------------------------------------------------------------------------
     // Proposing (section 3)
@@ -136,5 +146,22 @@ contract DvPSettlement {
     /// @notice The id the next proposal will receive.
     function nextTradeId() external view returns (uint256) {
         return _nextTradeId;
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Cancelling (section 3)
+    // ---------------------------------------------------------------------------------
+
+    /// @notice Withdraw a proposal. Seller only, and only while it is still PROPOSED.
+    /// @dev The buyer has no cancel: declining is doing nothing until the deadline. An
+    ///      expired trade can still be cancelled, which only tidies a record already dead.
+    function cancel(uint256 tradeId) external {
+        Trade storage trade = _trades[tradeId];
+
+        if (trade.status != Status.PROPOSED) revert TradeNotOpen(tradeId, trade.status);
+        if (msg.sender != trade.seller) revert NotSeller(tradeId, msg.sender);
+
+        trade.status = Status.CANCELLED;
+        emit TradeCancelled(tradeId, trade.seller, trade.buyer);
     }
 }
