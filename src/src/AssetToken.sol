@@ -44,6 +44,14 @@ contract AssetToken is ERC20, AccessControl {
     /// @notice A constructor argument was the zero address or the zero ISIN.
     error InvalidConfiguration();
 
+    /// @notice The account is not approved in the registry, or its approval has lapsed.
+    error NotApproved(address account);
+
+    /// @notice The party directing the transfer is sanctioned.
+    /// @dev The only check made on the spender: on a settlement it is a contract, and a
+    ///      contract can never be isApproved (section 3).
+    error SpenderSanctioned(address spender);
+
     // ---------------------------------------------------------------------------------
     // Construction
     // ---------------------------------------------------------------------------------
@@ -68,5 +76,34 @@ contract AssetToken is ERC20, AccessControl {
     /// @dev A bond is not divisible: a balance of 100 is one hundred bonds (section 9).
     function decimals() public pure override returns (uint8) {
         return 0;
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Transfers (section 3)
+    // ---------------------------------------------------------------------------------
+
+    /// @inheritdoc ERC20
+    /// @dev Only transferFrom pays for the spender check. On a direct transfer the spender
+    ///      is the sender, and isApproved(from) already implies not sanctioned.
+    function transferFrom(address from, address to, uint256 value) public override returns (bool) {
+        if (registry.isSanctioned(msg.sender)) revert SpenderSanctioned(msg.sender);
+        return super.transferFrom(from, to, value);
+    }
+
+    /// @dev The one place every transfer, mint and burn passes through: in OpenZeppelin
+    ///      v5.6.1 _update is the only virtual hook on the transfer path.
+    function _update(address from, address to, uint256 value) internal override {
+        // A burn (to == 0) delivers to nobody, so the sender side is not guarded (section 3).
+        // Unlike the cash leg, nothing here reads tierOf: there are no limits (section 4).
+        if (from != address(0) && to != address(0)) {
+            if (!registry.isApproved(from)) revert NotApproved(from);
+        }
+
+        // Also covers the mint recipient.
+        if (to != address(0)) {
+            if (!registry.isApproved(to)) revert NotApproved(to);
+        }
+
+        super._update(from, to, value);
     }
 }

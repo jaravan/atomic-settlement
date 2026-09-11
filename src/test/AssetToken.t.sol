@@ -7,7 +7,7 @@ import {IKYCRegistryV2} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
 import {AssetToken} from "../src/AssetToken.sol";
 import {MockKYCRegistry} from "./mocks/MockKYCRegistry.sol";
 
-/// @notice Step 1: construction, immutables, roles and denomination.
+/// @notice Steps 1-2: construction, roles, denomination, and the registry gate.
 contract AssetTokenTest is Test {
     AssetToken internal bond;
     MockKYCRegistry internal registry;
@@ -16,6 +16,9 @@ contract AssetTokenTest is Test {
     address internal constant ISSUER = address(0x155);
     address internal constant OFFICER = address(0x0FF);
     address internal constant STRANGER = address(0x5747);
+    address internal constant ALICE = address(0xA11);
+    address internal constant BOB = address(0xB0B);
+    address internal constant SETTLEMENT = address(0x5E77);
 
     bytes12 internal constant ISIN = bytes12("DE000A1EWWW0");
 
@@ -125,5 +128,145 @@ contract AssetTokenTest is Test {
         );
         vm.prank(STRANGER);
         bond.grantRole(issuerRole, ISSUER);
+    }
+
+    // -- the registry gate (sections 1, 3) -----------------------------------------------
+
+    /// @dev Whole bonds: decimals() is 0.
+    uint256 internal constant AMOUNT = 100;
+
+    /// @dev Written directly rather than minted, because several tests need a holder whose
+    ///      approval has lapsed -- a state mint cannot produce but the registry can.
+    function _fund(address who, uint256 amount) private {
+        deal(address(bond), who, amount, true);
+    }
+
+    /// @dev No tier is set: this token never reads one, and the tests should prove it.
+    function _approve(address who) private {
+        registry.setApproved(who, true);
+    }
+
+    function test_transfer_succeedsWhenBothApproved() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(ALICE);
+        bond.transfer(BOB, AMOUNT);
+
+        assertEq(bond.balanceOf(ALICE), 0);
+        assertEq(bond.balanceOf(BOB), AMOUNT);
+    }
+
+    /// @dev The asset leg has no limits, so an approved address with no tier transacts.
+    ///      On the cash leg this same setup reverts with TierUnset (section 4).
+    function test_transfer_needsNoTier() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        assertEq(uint8(registry.tierOf(ALICE)), 0, "UNSET");
+
+        vm.prank(ALICE);
+        bond.transfer(BOB, AMOUNT);
+
+        assertEq(bond.balanceOf(BOB), AMOUNT);
+    }
+
+    function test_transfer_revertsWhenSenderNotApproved() public {
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.expectRevert(abi.encodeWithSelector(AssetToken.NotApproved.selector, ALICE));
+        vm.prank(ALICE);
+        bond.transfer(BOB, AMOUNT);
+    }
+
+    function test_transfer_revertsWhenRecipientNotApproved() public {
+        _approve(ALICE);
+        _fund(ALICE, AMOUNT);
+
+        vm.expectRevert(abi.encodeWithSelector(AssetToken.NotApproved.selector, BOB));
+        vm.prank(ALICE);
+        bond.transfer(BOB, AMOUNT);
+    }
+
+    function test_transfer_revertsWhenSenderSanctioned() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+        registry.setSanctioned(ALICE, true);
+
+        vm.expectRevert(abi.encodeWithSelector(AssetToken.NotApproved.selector, ALICE));
+        vm.prank(ALICE);
+        bond.transfer(BOB, AMOUNT);
+    }
+
+    function test_transfer_gatesZeroValue() public {
+        _approve(ALICE);
+        _fund(ALICE, AMOUNT);
+
+        vm.expectRevert(abi.encodeWithSelector(AssetToken.NotApproved.selector, BOB));
+        vm.prank(ALICE);
+        bond.transfer(BOB, 0);
+    }
+
+    // -- transferFrom: the spender (section 3) -------------------------------------------
+
+    /// @dev The property the settlement design rests on: the spender is never asked to be
+    ///      isApproved, because a contract can never be.
+    function test_transferFrom_spenderNeedNotBeApproved() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(ALICE);
+        bond.approve(SETTLEMENT, AMOUNT);
+
+        assertFalse(registry.isApproved(SETTLEMENT), "settlement contract is deliberately unapproved");
+
+        vm.prank(SETTLEMENT);
+        bond.transferFrom(ALICE, BOB, AMOUNT);
+
+        assertEq(bond.balanceOf(BOB), AMOUNT);
+    }
+
+    function test_transferFrom_revertsWhenSpenderSanctioned() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+        registry.setSanctioned(SETTLEMENT, true);
+
+        vm.prank(ALICE);
+        bond.approve(SETTLEMENT, AMOUNT);
+
+        vm.expectRevert(abi.encodeWithSelector(AssetToken.SpenderSanctioned.selector, SETTLEMENT));
+        vm.prank(SETTLEMENT);
+        bond.transferFrom(ALICE, BOB, AMOUNT);
+    }
+
+    function test_transferFrom_spenderCheckPrecedesAllowance() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+        registry.setSanctioned(SETTLEMENT, true);
+
+        assertEq(bond.allowance(ALICE, SETTLEMENT), 0);
+
+        vm.expectRevert(abi.encodeWithSelector(AssetToken.SpenderSanctioned.selector, SETTLEMENT));
+        vm.prank(SETTLEMENT);
+        bond.transferFrom(ALICE, BOB, AMOUNT);
+    }
+
+    function test_transferFrom_stillGatesBothParties() public {
+        _approve(ALICE);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(ALICE);
+        bond.approve(SETTLEMENT, AMOUNT);
+
+        vm.expectRevert(abi.encodeWithSelector(AssetToken.NotApproved.selector, BOB));
+        vm.prank(SETTLEMENT);
+        bond.transferFrom(ALICE, BOB, AMOUNT);
     }
 }
