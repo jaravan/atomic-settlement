@@ -37,6 +37,9 @@ contract AssetToken is ERC20, AccessControl {
     ///      deployment and the identity is fixed at construction (section 9).
     bytes12 public immutable isin;
 
+    /// @notice Whether an address is frozen. A frozen address cannot send, but can receive.
+    mapping(address account => bool) public frozen;
+
     // ---------------------------------------------------------------------------------
     // Errors
     // ---------------------------------------------------------------------------------
@@ -47,10 +50,25 @@ contract AssetToken is ERC20, AccessControl {
     /// @notice The account is not approved in the registry, or its approval has lapsed.
     error NotApproved(address account);
 
+    /// @notice The sender is frozen. Frozen accounts can still receive.
+    error SenderFrozen(address account);
+
     /// @notice The party directing the transfer is sanctioned.
     /// @dev The only check made on the spender: on a settlement it is a contract, and a
     ///      contract can never be isApproved (section 3).
     error SpenderSanctioned(address spender);
+
+    // ---------------------------------------------------------------------------------
+    // Events
+    // ---------------------------------------------------------------------------------
+
+    /// @notice Emitted on freeze.
+    /// @dev `reason` is an enumerated bytes32 code, not free text: one word instead of
+    ///      unbounded calldata, and queryable by a compliance system (section 5).
+    event AccountFrozen(address indexed account, bytes32 reason, address indexed by);
+
+    /// @notice Emitted on unfreeze, carrying the same enumerated code.
+    event AccountUnfrozen(address indexed account, bytes32 reason, address indexed by);
 
     // ---------------------------------------------------------------------------------
     // Construction
@@ -97,6 +115,7 @@ contract AssetToken is ERC20, AccessControl {
         // Unlike the cash leg, nothing here reads tierOf: there are no limits (section 4).
         if (from != address(0) && to != address(0)) {
             if (!registry.isApproved(from)) revert NotApproved(from);
+            if (frozen[from]) revert SenderFrozen(from);
         }
 
         // Also covers the mint recipient.
@@ -105,5 +124,23 @@ contract AssetToken is ERC20, AccessControl {
         }
 
         super._update(from, to, value);
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Freeze (section 5)
+    // ---------------------------------------------------------------------------------
+
+    /// @notice Stop an address sending. It can still receive.
+    /// @dev Allowances are deliberately left in place: they cannot be enumerated on-chain,
+    ///      and a freeze is reversible where deleting approvals is not (section 3).
+    function freeze(address account, bytes32 reason) external onlyRole(COMPLIANCE_OFFICER_ROLE) {
+        frozen[account] = true;
+        emit AccountFrozen(account, reason, msg.sender);
+    }
+
+    /// @notice Lift a freeze.
+    function unfreeze(address account, bytes32 reason) external onlyRole(COMPLIANCE_OFFICER_ROLE) {
+        frozen[account] = false;
+        emit AccountUnfrozen(account, reason, msg.sender);
     }
 }

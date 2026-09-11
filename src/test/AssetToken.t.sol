@@ -7,7 +7,7 @@ import {IKYCRegistryV2} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
 import {AssetToken} from "../src/AssetToken.sol";
 import {MockKYCRegistry} from "./mocks/MockKYCRegistry.sol";
 
-/// @notice Steps 1-2: construction, roles, denomination, and the registry gate.
+/// @notice Steps 1-3: construction, roles, denomination, the registry gate, and freeze.
 contract AssetTokenTest is Test {
     AssetToken internal bond;
     MockKYCRegistry internal registry;
@@ -268,5 +268,149 @@ contract AssetTokenTest is Test {
         vm.expectRevert(abi.encodeWithSelector(AssetToken.NotApproved.selector, BOB));
         vm.prank(SETTLEMENT);
         bond.transferFrom(ALICE, BOB, AMOUNT);
+    }
+
+    // -- freeze (section 5) --------------------------------------------------------------
+
+    bytes32 internal constant REASON = bytes32("COURT_ORDER");
+
+    function _officer() private returns (address) {
+        vm.prank(ADMIN);
+        bond.grantRole(officerRole, OFFICER);
+        return OFFICER;
+    }
+
+    function test_freeze_blocksOutbound() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(_officer());
+        bond.freeze(ALICE, REASON);
+
+        assertTrue(bond.frozen(ALICE));
+
+        vm.expectRevert(abi.encodeWithSelector(AssetToken.SenderFrozen.selector, ALICE));
+        vm.prank(ALICE);
+        bond.transfer(BOB, AMOUNT);
+    }
+
+    function test_freeze_stillAllowsInbound() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(_officer());
+        bond.freeze(BOB, REASON);
+
+        vm.prank(ALICE);
+        bond.transfer(BOB, AMOUNT);
+
+        assertEq(bond.balanceOf(BOB), AMOUNT);
+    }
+
+    function test_unfreeze_restoresSending() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        address officer = _officer();
+        vm.prank(officer);
+        bond.freeze(ALICE, REASON);
+        vm.prank(officer);
+        bond.unfreeze(ALICE, REASON);
+
+        assertFalse(bond.frozen(ALICE));
+
+        vm.prank(ALICE);
+        bond.transfer(BOB, AMOUNT);
+
+        assertEq(bond.balanceOf(BOB), AMOUNT);
+    }
+
+    function test_freeze_blocksTransferFrom() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(ALICE);
+        bond.approve(SETTLEMENT, AMOUNT);
+
+        vm.prank(_officer());
+        bond.freeze(ALICE, REASON);
+
+        vm.expectRevert(abi.encodeWithSelector(AssetToken.SenderFrozen.selector, ALICE));
+        vm.prank(SETTLEMENT);
+        bond.transferFrom(ALICE, BOB, AMOUNT);
+    }
+
+    /// @dev Freezing does not clear allowances (section 3): the approval survives, unusable
+    ///      until the freeze lifts.
+    function test_freeze_leavesAllowanceIntact() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(ALICE);
+        bond.approve(SETTLEMENT, AMOUNT);
+
+        address officer = _officer();
+        vm.prank(officer);
+        bond.freeze(ALICE, REASON);
+
+        assertEq(bond.allowance(ALICE, SETTLEMENT), AMOUNT, "allowance must survive the freeze");
+
+        vm.prank(officer);
+        bond.unfreeze(ALICE, REASON);
+
+        vm.prank(SETTLEMENT);
+        bond.transferFrom(ALICE, BOB, AMOUNT);
+
+        assertEq(bond.balanceOf(BOB), AMOUNT);
+    }
+
+    function test_freeze_approvalCheckPrecedesFreezeCheck() public {
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(_officer());
+        bond.freeze(ALICE, REASON);
+
+        vm.expectRevert(abi.encodeWithSelector(AssetToken.NotApproved.selector, ALICE));
+        vm.prank(ALICE);
+        bond.transfer(BOB, AMOUNT);
+    }
+
+    function test_freeze_emitsEventWithReasonAndCaller() public {
+        address officer = _officer();
+
+        vm.expectEmit(true, true, true, true);
+        emit AssetToken.AccountFrozen(ALICE, REASON, officer);
+        vm.prank(officer);
+        bond.freeze(ALICE, REASON);
+
+        vm.expectEmit(true, true, true, true);
+        emit AssetToken.AccountUnfrozen(ALICE, REASON, officer);
+        vm.prank(officer);
+        bond.unfreeze(ALICE, REASON);
+    }
+
+    function test_freeze_requiresComplianceOfficer() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, STRANGER, officerRole)
+        );
+        vm.prank(STRANGER);
+        bond.freeze(ALICE, REASON);
+    }
+
+    function test_unfreeze_requiresComplianceOfficer() public {
+        vm.prank(_officer());
+        bond.freeze(ALICE, REASON);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, STRANGER, officerRole)
+        );
+        vm.prank(STRANGER);
+        bond.unfreeze(ALICE, REASON);
     }
 }
