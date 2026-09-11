@@ -582,13 +582,42 @@ on every transfer does not exist here ([section 4](#4-no-transfer-limits)), so t
 is cheaper than the cash leg on every path: one fewer `STATICCALL` into the registry
 proxy, and one fewer storage read/write.
 
-None of it is measured yet. The commitment is the same one
-[cash section 10](design-cash.md#10-gas) makes: a `forge snapshot` committed to the repo
-and gated in CI, compared against a vanilla ERC-20 baseline. If the registry round trips
-turn out to dominate, the `complianceOf(address) → (bool approved, bool sanctioned, Tier
-tier)` getter discussed there would fold two or three calls into one here too. Note that
-this token wants only two of that getter's three fields, which is itself an argument for
-measuring before shaping a shared interface around one consumer.
+### Measured
+
+`test/Gas.t.sol` (`AssetGasTest`), under the same conditions as the cash leg: mock registry
+behind a `delegatecall` proxy, cold then warm, base transaction cost excluded.
+
+| `transfer`                        |   cold |   warm | registry calls |
+| --------------------------------- | -----: | -----: | -------------: |
+| vanilla ERC-20                    | 18,888 |  4,788 |              0 |
+| **asset**                         | 41,118 | 10,018 |              2 |
+| cash, `NO_LIMIT` tier             | 49,412 | 12,312 |              3 |
+| cash, capped tier                 | 73,391 | 14,391 |              3 |
+
+| other asset paths     |   cold |   warm |
+| --------------------- | -----: | -----: |
+| `transferFrom`        | 47,736 | 12,633 |
+| `mint`                | 36,376 |  9,273 |
+| `burn`                |      - |  6,749 |
+| `forceTransfer`       | 34,482 |      - |
+
+Two things the numbers say:
+
+- **The dropped `tierOf` is worth 8,294 cold.** Asset `transfer` against cash-`NO_LIMIT` is
+  the cleanest comparison: identical paths except for that one call, and the gap is one
+  registry round trip through the proxy. That is the per-call cost the cash doc estimated.
+- **A forced transfer is cheaper than an ordinary one** (34,482 vs 41,118). It skips
+  `isApproved(from)` and the freeze read, pays two transient-storage ops for `_forcing`
+  instead, and the recipient check is the only registry call left. Transient storage is
+  doing what section 8 hoped: the flag costs almost nothing.
+
+**Against the real registry** (`test/AssetTokenRegistry.t.sol`): 40,425 cold, 11,325 warm.
+Within 2% of the mock, as on the cash leg. The mock is a sound stand-in for this
+measurement.
+
+`complianceOf` remains the change to make if the round trips matter, and this token wants
+only two of that getter's three fields -- which is still the argument for shaping it around
+measured need rather than one consumer.
 
 A settlement pays for both legs. The number that decides whether the network meets its
 settlement window is not either token's transfer cost but the sum of the two plus the

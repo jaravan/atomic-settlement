@@ -6,10 +6,10 @@ import {console2} from "forge-std/console2.sol";
 import {IKYCRegistryV2} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
 import {TokenizedCash} from "../src/TokenizedCash.sol";
 
-/// @notice Deploys TokenizedCash and hands every role to its intended holder.
+/// @notice Deploys one TokenizedCash -- one currency -- and hands every role to its holder.
 /// @dev The contract enforces the freeze-then-burn sequence but cannot see who holds which
 ///      key, so the separation section 2 requires is asserted here (section 9).
-contract Deploy is Script {
+contract DeployCash is Script {
     /// @notice Everything the deployment needs, gathered so it can be validated as a whole.
     struct Config {
         string name;

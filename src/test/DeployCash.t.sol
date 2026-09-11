@@ -3,14 +3,14 @@ pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
 import {IKYCRegistryV2, Tier} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
-import {Deploy} from "../script/Deploy.s.sol";
+import {DeployCash} from "../script/DeployCash.s.sol";
 import {TokenizedCash} from "../src/TokenizedCash.sol";
 import {MockKYCRegistry} from "./mocks/MockKYCRegistry.sol";
 
 /// @notice The deploy script carries the one control the contract cannot: that ISSUER_ROLE
 ///         and COMPLIANCE_OFFICER_ROLE go to different parties (sections 2, 9).
-contract DeployTest is Test {
-    Deploy internal script;
+contract DeployCashTest is Test {
+    DeployCash internal script;
     MockKYCRegistry internal registry;
 
     address internal constant ADMIN = address(0xA11CE);
@@ -19,12 +19,12 @@ contract DeployTest is Test {
     address internal constant PAUSER = address(0x9A05);
 
     function setUp() public {
-        script = new Deploy();
+        script = new DeployCash();
         registry = new MockKYCRegistry();
     }
 
-    function _config() private view returns (Deploy.Config memory) {
-        return Deploy.Config({
+    function _config() private view returns (DeployCash.Config memory) {
+        return DeployCash.Config({
             name: "Tokenized Euro",
             symbol: "tEUR",
             currency: bytes3("EUR"),
@@ -39,17 +39,17 @@ contract DeployTest is Test {
     // -- the control this script exists for ----------------------------------------------
 
     function test_revertsWhenIssuerAndOfficerAreTheSame() public {
-        Deploy.Config memory cfg = _config();
+        DeployCash.Config memory cfg = _config();
         cfg.complianceOfficer = ISSUER;
 
-        vm.expectRevert(abi.encodeWithSelector(Deploy.RolesNotSeparated.selector, ISSUER));
+        vm.expectRevert(abi.encodeWithSelector(DeployCash.RolesNotSeparated.selector, ISSUER));
         script.deploy(cfg, address(script));
     }
 
     /// @dev Admin holding issuer is fine: section 2 says admin can self-grant anyway, and the
     ///      grant would be a public event. It is issuer-and-officer that breaks the control.
     function test_allowsAdminToAlsoHoldAnOperationalRole() public {
-        Deploy.Config memory cfg = _config();
+        DeployCash.Config memory cfg = _config();
         cfg.issuer = ADMIN;
 
         TokenizedCash token = script.deploy(cfg, address(script));
@@ -101,44 +101,44 @@ contract DeployTest is Test {
     // -- configuration is validated before anything is deployed --------------------------
 
     function test_revertsOnZeroRegistry() public {
-        Deploy.Config memory cfg = _config();
+        DeployCash.Config memory cfg = _config();
         cfg.registry = IKYCRegistryV2(address(0));
 
-        vm.expectRevert(Deploy.InvalidConfiguration.selector);
+        vm.expectRevert(DeployCash.InvalidConfiguration.selector);
         script.deploy(cfg, address(script));
     }
 
     function test_revertsOnZeroAdmin() public {
-        Deploy.Config memory cfg = _config();
+        DeployCash.Config memory cfg = _config();
         cfg.admin = address(0);
 
-        vm.expectRevert(Deploy.InvalidConfiguration.selector);
+        vm.expectRevert(DeployCash.InvalidConfiguration.selector);
         script.deploy(cfg, address(script));
     }
 
     function test_revertsOnZeroPauser() public {
-        Deploy.Config memory cfg = _config();
+        DeployCash.Config memory cfg = _config();
         cfg.pauser = address(0);
 
-        vm.expectRevert(Deploy.InvalidConfiguration.selector);
+        vm.expectRevert(DeployCash.InvalidConfiguration.selector);
         script.deploy(cfg, address(script));
     }
 
     function test_revertsOnZeroCurrency() public {
-        Deploy.Config memory cfg = _config();
+        DeployCash.Config memory cfg = _config();
         cfg.currency = bytes3(0);
 
-        vm.expectRevert(Deploy.InvalidConfiguration.selector);
+        vm.expectRevert(DeployCash.InvalidConfiguration.selector);
         script.deploy(cfg, address(script));
     }
 
     /// @dev A registry address that is an EOA, or a chain where it was never deployed, is a
     ///      configuration mistake worth catching before the token exists.
     function test_revertsWhenRegistryHasNoCode() public {
-        Deploy.Config memory cfg = _config();
+        DeployCash.Config memory cfg = _config();
         cfg.registry = IKYCRegistryV2(address(0xDEAD));
 
-        vm.expectRevert(abi.encodeWithSelector(Deploy.RegistryHasNoCode.selector, address(0xDEAD)));
+        vm.expectRevert(abi.encodeWithSelector(DeployCash.RegistryHasNoCode.selector, address(0xDEAD)));
         script.deploy(cfg, address(script));
     }
 }
