@@ -5,12 +5,13 @@ import {Test} from "forge-std/Test.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
 import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {IKYCRegistryV2} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
 import {AssetToken} from "../src/AssetToken.sol";
 import {MockKYCRegistry} from "./mocks/MockKYCRegistry.sol";
 
-/// @notice Steps 1-5: construction, roles, denomination, the registry gate, freeze, pause and
-///         issuance.
+/// @notice Steps 1-6: construction, roles, denomination, the registry gate, freeze, pause,
+///         issuance and forced transfer.
 contract AssetTokenTest is Test {
     AssetToken internal bond;
     MockKYCRegistry internal registry;
@@ -694,5 +695,186 @@ contract AssetTokenTest is Test {
 
         assertEq(bond.balanceOf(ALICE), ISSUE_SIZE);
         assertEq(bond.totalSupply(), ISSUE_SIZE);
+    }
+
+    // -- forceTransfer: the two-key control, without moving supply (section 8) -----------
+
+    address internal constant NEW_OWNER = address(0x0E0);
+
+    /// @dev Alice holds the issue, is frozen, and the issuer is ready to act.
+    function _seizureReady() private returns (address issuer, address officer) {
+        _approve(ALICE);
+        _approve(NEW_OWNER);
+        issuer = _issuer();
+        vm.prank(issuer);
+        bond.mint(ALICE, ISSUE_SIZE);
+        officer = _officer();
+        vm.prank(officer);
+        bond.freeze(ALICE, REASON);
+    }
+
+    function test_forceTransfer_revertsUnlessFrozen() public {
+        _approve(ALICE);
+        _approve(NEW_OWNER);
+        address issuer = _issuer();
+        vm.prank(issuer);
+        bond.mint(ALICE, ISSUE_SIZE);
+
+        vm.expectRevert(abi.encodeWithSelector(AssetToken.AccountNotFrozen.selector, ALICE));
+        vm.prank(issuer);
+        bond.forceTransfer(ALICE, NEW_OWNER, ISSUE_SIZE, REASON);
+    }
+
+    function test_forceTransfer_movesBondsOnceFrozen() public {
+        (address issuer,) = _seizureReady();
+
+        vm.prank(issuer);
+        bond.forceTransfer(ALICE, NEW_OWNER, ISSUE_SIZE, REASON);
+
+        assertEq(bond.balanceOf(ALICE), 0);
+        assertEq(bond.balanceOf(NEW_OWNER), ISSUE_SIZE);
+    }
+
+    /// @dev The whole point of the section: the issue size never moves.
+    function test_forceTransfer_leavesTotalSupplyUnchanged() public {
+        (address issuer,) = _seizureReady();
+        uint256 before = bond.totalSupply();
+
+        vm.prank(issuer);
+        bond.forceTransfer(ALICE, NEW_OWNER, ISSUE_SIZE, REASON);
+
+        assertEq(bond.totalSupply(), before);
+        assertEq(bond.totalSupply(), ISSUE_SIZE);
+    }
+
+    /// @dev Distinguishable from an ordinary payment: a ForcedTransfer alongside the Transfer.
+    function test_forceTransfer_emitsBothEvents() public {
+        (address issuer,) = _seizureReady();
+
+        vm.expectEmit(true, true, true, true);
+        emit IERC20.Transfer(ALICE, NEW_OWNER, ISSUE_SIZE);
+        vm.expectEmit(true, true, true, true);
+        emit AssetToken.ForcedTransfer(ALICE, NEW_OWNER, ISSUE_SIZE, REASON, issuer);
+        vm.prank(issuer);
+        bond.forceTransfer(ALICE, NEW_OWNER, ISSUE_SIZE, REASON);
+    }
+
+    /// @dev The target is typically sanctioned and unapproved by the time a court order
+    ///      exists. The sender-side checks are skipped so the function works exactly then.
+    function test_forceTransfer_worksOnSanctionedHolder() public {
+        (address issuer,) = _seizureReady();
+        registry.setSanctioned(ALICE, true);
+        assertFalse(registry.isApproved(ALICE));
+
+        vm.prank(issuer);
+        bond.forceTransfer(ALICE, NEW_OWNER, ISSUE_SIZE, REASON);
+
+        assertEq(bond.balanceOf(NEW_OWNER), ISSUE_SIZE);
+    }
+
+    /// @dev The bypass is sender-side only: isApproved(to) still runs.
+    function test_forceTransfer_recipientMustStillBeApproved() public {
+        (address issuer,) = _seizureReady();
+        registry.setApproved(NEW_OWNER, false);
+
+        vm.expectRevert(abi.encodeWithSelector(AssetToken.NotApproved.selector, NEW_OWNER));
+        vm.prank(issuer);
+        bond.forceTransfer(ALICE, NEW_OWNER, ISSUE_SIZE, REASON);
+    }
+
+    function test_forceTransfer_requiresIssuerRole() public {
+        (, address officer) = _seizureReady();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, officer, issuerRole)
+        );
+        vm.prank(officer);
+        bond.forceTransfer(ALICE, NEW_OWNER, ISSUE_SIZE, REASON);
+    }
+
+    /// @dev Neither key completes a seizure alone (section 8).
+    function test_forceTransfer_neitherRoleAloneCanSeize() public {
+        _approve(ALICE);
+        _approve(NEW_OWNER);
+        address issuer = _issuer();
+        vm.prank(issuer);
+        bond.mint(ALICE, ISSUE_SIZE);
+
+        // issuer alone: not frozen
+        vm.expectRevert(abi.encodeWithSelector(AssetToken.AccountNotFrozen.selector, ALICE));
+        vm.prank(issuer);
+        bond.forceTransfer(ALICE, NEW_OWNER, ISSUE_SIZE, REASON);
+
+        // officer alone: freezes, but cannot move
+        address officer = _officer();
+        vm.prank(officer);
+        bond.freeze(ALICE, REASON);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, officer, issuerRole)
+        );
+        vm.prank(officer);
+        bond.forceTransfer(ALICE, NEW_OWNER, ISSUE_SIZE, REASON);
+
+        assertEq(bond.balanceOf(ALICE), ISSUE_SIZE, "untouched by either role alone");
+    }
+
+    function test_forceTransfer_blockedWhilePaused() public {
+        (address issuer,) = _seizureReady();
+        vm.prank(_pauser());
+        bond.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(issuer);
+        bond.forceTransfer(ALICE, NEW_OWNER, ISSUE_SIZE, REASON);
+    }
+
+    // -- the _forcing flag never leaks (section 8) ----------------------------------------
+
+    /// @dev After a successful forced transfer, an ordinary transfer from a frozen sender
+    ///      must still be refused: the bypass was for that one call only.
+    function test_forcing_clearsAfterSuccess() public {
+        (address issuer,) = _seizureReady();
+
+        vm.prank(issuer);
+        bond.forceTransfer(ALICE, NEW_OWNER, ISSUE_SIZE / 2, REASON);
+
+        vm.expectRevert(abi.encodeWithSelector(AssetToken.SenderFrozen.selector, ALICE));
+        vm.prank(ALICE);
+        bond.transfer(NEW_OWNER, 1);
+    }
+
+    /// @dev A forced transfer that reverts inside _update must not leave the flag set. The
+    ///      recipient check is the revert that fires after the flag is raised.
+    function test_forcing_clearsAfterRevert() public {
+        (address issuer,) = _seizureReady();
+        registry.setApproved(NEW_OWNER, false);
+
+        vm.expectRevert(abi.encodeWithSelector(AssetToken.NotApproved.selector, NEW_OWNER));
+        vm.prank(issuer);
+        bond.forceTransfer(ALICE, NEW_OWNER, ISSUE_SIZE, REASON);
+
+        // Same transaction context: if the flag leaked, this frozen sender could transfer.
+        _approve(BOB);
+        vm.expectRevert(abi.encodeWithSelector(AssetToken.SenderFrozen.selector, ALICE));
+        vm.prank(ALICE);
+        bond.transfer(BOB, 1);
+    }
+
+    // -- non-cooperative redemption composes from the primitives (section 7) ---------------
+
+    /// @dev forceTransfer to the issuer, then burn. Supply is correct at every step.
+    function test_mandatoryRedemption_neverLeavesSupplyWrong() public {
+        (address issuer,) = _seizureReady();
+        _approve(issuer);
+
+        vm.prank(issuer);
+        bond.forceTransfer(ALICE, issuer, ISSUE_SIZE, REASON);
+        assertEq(bond.totalSupply(), ISSUE_SIZE, "bonds moved, none destroyed yet");
+        assertEq(bond.balanceOf(issuer), ISSUE_SIZE);
+
+        vm.prank(issuer);
+        bond.burn(ISSUE_SIZE);
+        assertEq(bond.totalSupply(), 0, "supply falls only once the issuer actually holds them");
     }
 }

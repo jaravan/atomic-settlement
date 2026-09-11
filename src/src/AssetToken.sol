@@ -41,6 +41,10 @@ contract AssetToken is ERC20, AccessControl, Pausable {
     /// @notice Whether an address is frozen. A frozen address cannot send, but can receive.
     mapping(address account => bool) public frozen;
 
+    /// @dev Tells _update to skip the sender-side checks for one forced transfer. Transient
+    ///      (EIP-1153): set and cleared within a single call, and a revert unwinds it.
+    bool private transient _forcing;
+
     // ---------------------------------------------------------------------------------
     // Errors
     // ---------------------------------------------------------------------------------
@@ -53,6 +57,11 @@ contract AssetToken is ERC20, AccessControl, Pausable {
 
     /// @notice The sender is frozen. Frozen accounts can still receive.
     error SenderFrozen(address account);
+
+    /// @notice `forceTransfer` was called on an account that has not been frozen first.
+    /// @dev The frozen precondition is the whole control: a move without consent can only
+    ///      follow a public, attributed, reversible act by a different role (section 8).
+    error AccountNotFrozen(address account);
 
     /// @notice The party directing the transfer is sanctioned.
     /// @dev The only check made on the spender: on a settlement it is a contract, and a
@@ -76,6 +85,12 @@ contract AssetToken is ERC20, AccessControl, Pausable {
 
     /// @notice Emitted at redemption, from the issuer's own balance.
     event Burned(address indexed from, uint256 value, address indexed issuer);
+
+    /// @notice Emitted alongside the ERC-20 Transfer when bonds are moved without the
+    ///         holder's consent, so a seizure is a distinct event type in the log.
+    event ForcedTransfer(
+        address indexed from, address indexed to, uint256 value, bytes32 reason, address indexed issuer
+    );
 
     // ---------------------------------------------------------------------------------
     // Construction
@@ -128,7 +143,8 @@ contract AssetToken is ERC20, AccessControl, Pausable {
     function _update(address from, address to, uint256 value) internal override whenNotPaused {
         // A burn (to == 0) delivers to nobody, so the sender side is not guarded (section 3).
         // Unlike the cash leg, nothing here reads tierOf: there are no limits (section 4).
-        if (from != address(0) && to != address(0)) {
+        // A forced transfer skips the sender side too: its target is frozen by requirement.
+        if (from != address(0) && to != address(0) && !_forcing) {
             if (!registry.isApproved(from)) revert NotApproved(from);
             if (frozen[from]) revert SenderFrozen(from);
         }
@@ -192,5 +208,27 @@ contract AssetToken is ERC20, AccessControl, Pausable {
     function burn(uint256 value) external onlyRole(ISSUER_ROLE) {
         _burn(msg.sender, value);
         emit Burned(msg.sender, value, msg.sender);
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Forced transfer (section 8)
+    // ---------------------------------------------------------------------------------
+
+    /// @notice Move bonds from a holder that has not consented. Reverts unless the holder
+    ///         is already frozen. Total supply is unchanged.
+    /// @dev Not burn-and-mint: a bond issue is a fixed legal quantity, and a supply that dips
+    ///      and recovers is a reconciliation break, not a signal (section 8).
+    function forceTransfer(address from, address to, uint256 value, bytes32 reason)
+        external
+        onlyRole(ISSUER_ROLE)
+        whenNotPaused
+    {
+        if (!frozen[from]) revert AccountNotFrozen(from);
+
+        _forcing = true;
+        _transfer(from, to, value); // _update still runs isApproved(to)
+        _forcing = false;
+
+        emit ForcedTransfer(from, to, value, reason, msg.sender);
     }
 }
