@@ -10,8 +10,8 @@ import {IKYCRegistryV2} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
 import {AssetToken} from "../src/AssetToken.sol";
 import {MockKYCRegistry} from "./mocks/MockKYCRegistry.sol";
 
-/// @notice Steps 1-6: construction, roles, denomination, the registry gate, freeze, pause,
-///         issuance and forced transfer.
+/// @notice Steps 1-7: construction, roles, denomination, the registry gate, freeze, pause,
+///         issuance, forced transfer and the transfer previews.
 contract AssetTokenTest is Test {
     AssetToken internal bond;
     MockKYCRegistry internal registry;
@@ -876,5 +876,216 @@ contract AssetTokenTest is Test {
         vm.prank(issuer);
         bond.burn(ISSUE_SIZE);
         assertEq(bond.totalSupply(), 0, "supply falls only once the issuer actually holds them");
+    }
+
+    // -- previewing the checks (section 3) -----------------------------------------------
+
+    function _selectorOf(bytes memory err) private pure returns (bytes4 selector) {
+        assembly {
+            selector := mload(add(err, 0x20))
+        }
+    }
+
+    /// @dev Whatever `canTransfer` reports is exactly what the real call reverts with.
+    function _assertPreviewMatchesReality(address from, address to, uint256 value) private {
+        (bool ok, bytes4 reason) = bond.canTransfer(from, to, value);
+
+        vm.prank(from);
+        (bool succeeded, bytes memory err) =
+            address(bond).call(abi.encodeWithSelector(IERC20.transfer.selector, to, value));
+
+        assertEq(succeeded, ok, "preview disagreed on whether the call would succeed");
+        if (!ok) assertEq(_selectorOf(err), reason, "preview named a different error");
+    }
+
+    function test_canTransfer_trueWhenEverythingPasses() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        (bool ok, bytes4 reason) = bond.canTransfer(ALICE, BOB, AMOUNT);
+
+        assertTrue(ok);
+        assertEq(reason, bytes4(0));
+    }
+
+    function test_canTransfer_reportsUnapprovedSender() public {
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        (bool ok, bytes4 reason) = bond.canTransfer(ALICE, BOB, AMOUNT);
+
+        assertFalse(ok);
+        assertEq(reason, AssetToken.NotApproved.selector);
+        _assertPreviewMatchesReality(ALICE, BOB, AMOUNT);
+    }
+
+    function test_canTransfer_reportsFrozenSender() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+        vm.prank(_officer());
+        bond.freeze(ALICE, REASON);
+
+        (bool ok, bytes4 reason) = bond.canTransfer(ALICE, BOB, AMOUNT);
+
+        assertFalse(ok);
+        assertEq(reason, AssetToken.SenderFrozen.selector);
+        _assertPreviewMatchesReality(ALICE, BOB, AMOUNT);
+    }
+
+    function test_canTransfer_reportsPause() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+        vm.prank(_pauser());
+        bond.pause();
+
+        (bool ok, bytes4 reason) = bond.canTransfer(ALICE, BOB, AMOUNT);
+
+        assertFalse(ok);
+        assertEq(reason, Pausable.EnforcedPause.selector);
+        _assertPreviewMatchesReality(ALICE, BOB, AMOUNT);
+    }
+
+    function test_canTransfer_reportsInsufficientBalance() public {
+        _approve(ALICE);
+        _approve(BOB);
+
+        (bool ok, bytes4 reason) = bond.canTransfer(ALICE, BOB, AMOUNT);
+
+        assertFalse(ok);
+        assertEq(reason, IERC20Errors.ERC20InsufficientBalance.selector);
+        _assertPreviewMatchesReality(ALICE, BOB, AMOUNT);
+    }
+
+    /// @dev No tier, no limits: an address the cash leg would refuse with TierUnset previews
+    ///      as fine here. Pins the section 4 difference on the preview path too.
+    function test_canTransfer_needsNoTier() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+        assertEq(uint8(registry.tierOf(ALICE)), 0, "UNSET");
+
+        (bool ok,) = bond.canTransfer(ALICE, BOB, AMOUNT);
+
+        assertTrue(ok);
+    }
+
+    function test_canTransfer_doesNotMutateState() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        bond.canTransfer(ALICE, BOB, AMOUNT);
+
+        assertEq(bond.balanceOf(ALICE), AMOUNT);
+        assertEq(bond.balanceOf(BOB), 0);
+    }
+
+    // -- canTransferFrom ------------------------------------------------------------------
+
+    function test_canTransferFrom_trueForUnapprovedSpender() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+        vm.prank(ALICE);
+        bond.approve(SETTLEMENT, AMOUNT);
+
+        assertFalse(registry.isApproved(SETTLEMENT));
+
+        (bool ok, bytes4 reason) = bond.canTransferFrom(SETTLEMENT, ALICE, BOB, AMOUNT);
+
+        assertTrue(ok, "a settlement contract must preview as able to deliver bonds");
+        assertEq(reason, bytes4(0));
+    }
+
+    function test_canTransferFrom_reportsSanctionedSpender() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+        vm.prank(ALICE);
+        bond.approve(SETTLEMENT, AMOUNT);
+        registry.setSanctioned(SETTLEMENT, true);
+
+        (bool ok, bytes4 reason) = bond.canTransferFrom(SETTLEMENT, ALICE, BOB, AMOUNT);
+
+        assertFalse(ok);
+        assertEq(reason, AssetToken.SpenderSanctioned.selector);
+    }
+
+    function test_canTransferFrom_reportsMissingAllowance() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        (bool ok, bytes4 reason) = bond.canTransferFrom(SETTLEMENT, ALICE, BOB, AMOUNT);
+
+        assertFalse(ok);
+        assertEq(reason, IERC20Errors.ERC20InsufficientAllowance.selector);
+    }
+
+    function test_canTransferFrom_sanctionsOutrankMissingAllowance() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+        registry.setSanctioned(SETTLEMENT, true);
+
+        (, bytes4 reason) = bond.canTransferFrom(SETTLEMENT, ALICE, BOB, AMOUNT);
+
+        assertEq(reason, AssetToken.SpenderSanctioned.selector);
+    }
+
+    function test_canTransferFrom_stillReportsSenderSideFailures() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+        vm.prank(ALICE);
+        bond.approve(SETTLEMENT, AMOUNT);
+        vm.prank(_officer());
+        bond.freeze(ALICE, REASON);
+
+        (bool ok, bytes4 reason) = bond.canTransferFrom(SETTLEMENT, ALICE, BOB, AMOUNT);
+
+        assertFalse(ok);
+        assertEq(reason, AssetToken.SenderFrozen.selector);
+    }
+
+    // -- the preview and a forced transfer cannot disagree ---------------------------------
+
+    /// @dev A preview is never a forced transfer: it reports a frozen sender as frozen, even
+    ///      though the issuer could move those bonds with forceTransfer. The preview answers
+    ///      "would a transfer work", not "could anyone move this".
+    function test_canTransfer_frozenSenderPreviewsAsFrozenNotForceable() public {
+        (address issuer,) = _seizureReady();
+
+        (bool ok, bytes4 reason) = bond.canTransfer(ALICE, NEW_OWNER, ISSUE_SIZE);
+        assertFalse(ok);
+        assertEq(reason, AssetToken.SenderFrozen.selector);
+
+        // and yet the forced path goes through, because it sets _forcing and a preview cannot
+        vm.prank(issuer);
+        bond.forceTransfer(ALICE, NEW_OWNER, ISSUE_SIZE, REASON);
+        assertEq(bond.balanceOf(NEW_OWNER), ISSUE_SIZE);
+    }
+
+    // -- the preview machinery itself -----------------------------------------------------
+
+    function test_previewTransfer_revertsWithTheRealError() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+        vm.prank(_officer());
+        bond.freeze(ALICE, REASON);
+
+        vm.expectRevert(abi.encodeWithSelector(AssetToken.SenderFrozen.selector, ALICE));
+        bond.previewTransfer(ALICE, BOB, AMOUNT);
+    }
+
+    function test_previewTransfer_returnsQuietlyWhenItWouldSucceed() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+        bond.previewTransfer(ALICE, BOB, AMOUNT);
     }
 }
