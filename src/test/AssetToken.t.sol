@@ -3,11 +3,12 @@ pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {Pausable} from "@openzeppelin/contracts/utils/Pausable.sol";
 import {IKYCRegistryV2} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
 import {AssetToken} from "../src/AssetToken.sol";
 import {MockKYCRegistry} from "./mocks/MockKYCRegistry.sol";
 
-/// @notice Steps 1-3: construction, roles, denomination, the registry gate, and freeze.
+/// @notice Steps 1-4: construction, roles, denomination, the registry gate, freeze and pause.
 contract AssetTokenTest is Test {
     AssetToken internal bond;
     MockKYCRegistry internal registry;
@@ -412,5 +413,151 @@ contract AssetTokenTest is Test {
         );
         vm.prank(STRANGER);
         bond.unfreeze(ALICE, REASON);
+    }
+
+    // -- pause (section 6) ---------------------------------------------------------------
+
+    function _pauser() private returns (address) {
+        vm.prank(ADMIN);
+        bond.grantRole(pauserRole, OFFICER);
+        return OFFICER;
+    }
+
+    function test_pause_blocksTransfer() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(_pauser());
+        bond.pause();
+
+        assertTrue(bond.paused());
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(ALICE);
+        bond.transfer(BOB, AMOUNT);
+    }
+
+    function test_pause_blocksTransferFrom() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(ALICE);
+        bond.approve(SETTLEMENT, AMOUNT);
+
+        vm.prank(_pauser());
+        bond.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(SETTLEMENT);
+        bond.transferFrom(ALICE, BOB, AMOUNT);
+    }
+
+    function test_pause_blocksApprove() public {
+        _approve(ALICE);
+
+        vm.prank(_pauser());
+        bond.pause();
+
+        vm.expectRevert(Pausable.EnforcedPause.selector);
+        vm.prank(ALICE);
+        bond.approve(SETTLEMENT, AMOUNT);
+    }
+
+    function test_pause_leavesViewsReadable() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        vm.prank(ALICE);
+        bond.approve(SETTLEMENT, AMOUNT);
+
+        vm.prank(_pauser());
+        bond.pause();
+
+        assertEq(bond.balanceOf(ALICE), AMOUNT);
+        assertEq(bond.allowance(ALICE, SETTLEMENT), AMOUNT);
+        assertEq(bond.totalSupply(), AMOUNT);
+        assertEq(bond.isin(), ISIN);
+        assertFalse(bond.frozen(ALICE));
+    }
+
+    function test_unpause_restoresTransfers() public {
+        _approve(ALICE);
+        _approve(BOB);
+        _fund(ALICE, AMOUNT);
+
+        address pauser = _pauser();
+        vm.prank(pauser);
+        bond.pause();
+        vm.prank(pauser);
+        bond.unpause();
+
+        assertFalse(bond.paused());
+
+        vm.prank(ALICE);
+        bond.transfer(BOB, AMOUNT);
+
+        assertEq(bond.balanceOf(BOB), AMOUNT);
+    }
+
+    /// @dev A pause is an incident control; it must not disarm the per-address one.
+    function test_pause_doesNotBlockFreezing() public {
+        vm.prank(_pauser());
+        bond.pause();
+
+        vm.prank(_officer());
+        bond.freeze(ALICE, REASON);
+
+        assertTrue(bond.frozen(ALICE));
+    }
+
+    /// @dev One deployment per issue: pausing this instrument leaves another untouched.
+    function test_pause_isPerInstrument() public {
+        AssetToken other =
+            new AssetToken("Bund 2040", "BUND40", bytes12("DE000A1EWWX8"), IKYCRegistryV2(address(registry)), ADMIN);
+        _approve(ALICE);
+        _approve(BOB);
+        deal(address(other), ALICE, AMOUNT, true);
+
+        vm.prank(_pauser());
+        bond.pause();
+
+        vm.prank(ALICE);
+        other.transfer(BOB, AMOUNT);
+
+        assertEq(other.balanceOf(BOB), AMOUNT);
+        assertFalse(other.paused());
+    }
+
+    function test_pause_requiresPauserRole() public {
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, STRANGER, pauserRole)
+        );
+        vm.prank(STRANGER);
+        bond.pause();
+    }
+
+    function test_unpause_requiresPauserRole() public {
+        vm.prank(_pauser());
+        bond.pause();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, STRANGER, pauserRole)
+        );
+        vm.prank(STRANGER);
+        bond.unpause();
+    }
+
+    function test_pause_complianceOfficerCannotPause() public {
+        // Hoisted: the helper makes a call of its own, which vm.expectRevert would latch onto.
+        address officer = _officer();
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, officer, pauserRole)
+        );
+        vm.prank(officer);
+        bond.pause();
     }
 }
