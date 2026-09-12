@@ -4,7 +4,7 @@ pragma solidity 0.8.30;
 import {Test} from "forge-std/Test.sol";
 import {DvPSettlement} from "../src/DvPSettlement.sol";
 
-/// @notice Steps 1-2: recording and withdrawing a proposal.
+/// @notice Steps 1-3: recording and withdrawing a proposal, and the terms hash.
 contract DvPSettlementTest is Test {
     DvPSettlement internal dvp;
 
@@ -301,5 +301,106 @@ contract DvPSettlementTest is Test {
 
         assertEq(uint8(dvp.trades(a).status), uint8(DvPSettlement.Status.CANCELLED));
         assertEq(uint8(dvp.trades(b).status), uint8(DvPSettlement.Status.PROPOSED));
+    }
+
+    // -- the terms hash (section 2) ------------------------------------------------------
+
+    function test_hashTerms_isDeterministic() public view {
+        assertEq(dvp.hashTerms(1, SELLER, _terms()), dvp.hashTerms(1, SELLER, _terms()));
+    }
+
+    /// @dev Pins the layout, so an off-chain client can compute the same value from its own
+    ///      record without calling the contract -- which section 2 says it must.
+    function test_hashTerms_matchesDocumentedLayout() public view {
+        DvPSettlement.Terms memory t = _terms();
+        bytes32 expected = keccak256(
+            abi.encode(
+                block.chainid,
+                address(dvp),
+                uint256(1),
+                SELLER,
+                t.buyer,
+                t.cashToken,
+                t.currency,
+                t.cashAmount,
+                t.assetToken,
+                t.isin,
+                t.assetAmount,
+                t.deadline
+            )
+        );
+        assertEq(dvp.hashTerms(1, SELLER, t), expected);
+    }
+
+    // -- every term is load-bearing --------------------------------------------------------
+
+    function test_hashTerms_changesWithTradeId() public view {
+        assertTrue(dvp.hashTerms(1, SELLER, _terms()) != dvp.hashTerms(2, SELLER, _terms()));
+    }
+
+    function test_hashTerms_changesWithSeller() public view {
+        assertTrue(dvp.hashTerms(1, SELLER, _terms()) != dvp.hashTerms(1, STRANGER, _terms()));
+    }
+
+    function test_hashTerms_changesWithEachField() public view {
+        bytes32 base = dvp.hashTerms(1, SELLER, _terms());
+        DvPSettlement.Terms memory t;
+
+        t = _terms();
+        t.buyer = STRANGER;
+        assertTrue(dvp.hashTerms(1, SELLER, t) != base, "buyer");
+
+        t = _terms();
+        t.cashToken = STRANGER;
+        assertTrue(dvp.hashTerms(1, SELLER, t) != base, "cashToken");
+
+        t = _terms();
+        t.currency = bytes3("USD");
+        assertTrue(dvp.hashTerms(1, SELLER, t) != base, "currency");
+
+        t = _terms();
+        t.cashAmount = CASH_AMOUNT + 1;
+        assertTrue(dvp.hashTerms(1, SELLER, t) != base, "cashAmount");
+
+        t = _terms();
+        t.assetToken = STRANGER;
+        assertTrue(dvp.hashTerms(1, SELLER, t) != base, "assetToken");
+
+        t = _terms();
+        t.isin = bytes12("DE000A1EWWX8");
+        assertTrue(dvp.hashTerms(1, SELLER, t) != base, "isin");
+
+        t = _terms();
+        t.assetAmount = BOND_AMOUNT + 1;
+        assertTrue(dvp.hashTerms(1, SELLER, t) != base, "assetAmount");
+
+        t = _terms();
+        t.deadline = deadline + 1;
+        assertTrue(dvp.hashTerms(1, SELLER, t) != base, "deadline");
+    }
+
+    /// @dev The two ordinary mistakes section 2 is built to catch: one extra zero, and the
+    ///      right terms against the wrong id. Both change the hash.
+    function test_hashTerms_catchesTheTwoOrdinaryMistakes() public view {
+        bytes32 agreed = dvp.hashTerms(47, SELLER, _terms());
+
+        DvPSettlement.Terms memory tenX = _terms();
+        tenX.cashAmount = CASH_AMOUNT * 10;
+        assertTrue(dvp.hashTerms(47, SELLER, tenX) != agreed, "10,000,000 typed as 100,000,000");
+
+        assertTrue(dvp.hashTerms(48, SELLER, _terms()) != agreed, "meant 47, called 48");
+    }
+
+    // -- bound to this deployment and this chain --------------------------------------------
+
+    function test_hashTerms_changesWithContractAddress() public {
+        DvPSettlement other = new DvPSettlement();
+        assertTrue(dvp.hashTerms(1, SELLER, _terms()) != other.hashTerms(1, SELLER, _terms()));
+    }
+
+    function test_hashTerms_changesWithChainId() public {
+        bytes32 here = dvp.hashTerms(1, SELLER, _terms());
+        vm.chainId(999);
+        assertTrue(dvp.hashTerms(1, SELLER, _terms()) != here);
     }
 }

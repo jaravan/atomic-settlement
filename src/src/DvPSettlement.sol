@@ -164,4 +164,32 @@ contract DvPSettlement {
         trade.status = Status.CANCELLED;
         emit TradeCancelled(tradeId, trade.seller, trade.buyer);
     }
+
+    // ---------------------------------------------------------------------------------
+    // The terms hash (section 2)
+    // ---------------------------------------------------------------------------------
+
+    /// @notice The hash a buyer passes to `settle`, computed from the buyer's own record of
+    ///         the trade -- never from reading the proposal back and hashing that.
+    /// @dev Binds the terms to one trade on one deployment on one chain: the same terms
+    ///      under another id, contract or chain hash differently, so a hash is worthless
+    ///      against any trade but the one it was made for.
+    function hashTerms(uint256 tradeId, address seller, Terms memory terms) public view returns (bytes32) {
+        return keccak256(
+            abi.encode(
+                block.chainid,
+                address(this),
+                tradeId,
+                seller,
+                terms.buyer,
+                terms.cashToken,
+                terms.currency,
+                terms.cashAmount,
+                terms.assetToken,
+                terms.isin,
+                terms.assetAmount,
+                terms.deadline
+            )
+        );
+    }
 }
