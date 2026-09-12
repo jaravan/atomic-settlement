@@ -8,8 +8,9 @@ import {DvPSettlement} from "../src/DvPSettlement.sol";
 import {TokenizedCash} from "../src/TokenizedCash.sol";
 import {AssetToken} from "../src/AssetToken.sol";
 import {MockKYCRegistry} from "./mocks/MockKYCRegistry.sol";
+import {FalseReturningLeg} from "./mocks/FalseReturningLeg.sol";
 
-/// @notice Steps 1-4: proposing, cancelling, the terms hash, and settling.
+/// @notice Steps 1-5: proposing, cancelling, the terms hash, settling, and the preview.
 contract DvPSettlementTest is Test {
     DvPSettlement internal dvp;
     MockKYCRegistry internal registry;
@@ -774,5 +775,229 @@ contract DvPSettlementTest is Test {
         vm.expectRevert(abi.encodeWithSelector(DvPSettlement.TermsMismatch.selector, id));
         vm.prank(BUYER);
         dvp.settle(id, keccak256("also wrong"));
+    }
+
+    // -- canSettle (section 5) -------------------------------------------------------------
+
+    function _selectorOf(bytes memory err) private pure returns (bytes4 selector) {
+        assembly {
+            selector := mload(add(err, 0x20))
+        }
+    }
+
+    /// @dev The property the preview exists for: whatever canSettle reports is exactly what
+    ///      the real settle reverts with. Runs both and compares.
+    function _assertPreviewMatchesReality(uint256 id, bytes32 h) private {
+        (bool ok, bytes4 reason) = dvp.canSettle(id, h);
+
+        vm.prank(BUYER);
+        (bool succeeded, bytes memory err) = address(dvp).call(abi.encodeCall(DvPSettlement.settle, (id, h)));
+
+        assertEq(succeeded, ok, "preview disagreed on whether settle would succeed");
+        if (!ok) assertEq(_selectorOf(err), reason, "preview named a different cause");
+    }
+
+    function test_canSettle_trueWhenReady() public {
+        uint256 id = _readyToSettle();
+
+        (bool ok, bytes4 reason) = dvp.canSettle(id, _buyersHash(id));
+
+        assertTrue(ok);
+        assertEq(reason, bytes4(0));
+        _assertPreviewMatchesReality(id, _buyersHash(id));
+    }
+
+    function test_canSettle_doesNotMutateState() public {
+        uint256 id = _readyToSettle();
+
+        dvp.canSettle(id, _buyersHash(id));
+
+        assertEq(uint8(dvp.trades(id).status), uint8(DvPSettlement.Status.PROPOSED));
+        assertEq(cash.balanceOf(BUYER), CASH_AMOUNT);
+        assertEq(bond.balanceOf(SELLER), BOND_AMOUNT);
+    }
+
+    // -- this contract's own causes, in settle's order ----------------------------------------
+
+    function test_canSettle_reportsNotOpen() public {
+        (bool ok, bytes4 reason) = dvp.canSettle(42, bytes32(0));
+        assertFalse(ok);
+        assertEq(reason, DvPSettlement.TradeNotOpen.selector);
+        _assertPreviewMatchesReality(42, bytes32(0));
+    }
+
+    function test_canSettle_reportsSettled() public {
+        uint256 id = _readyToSettle();
+        bytes32 h = _buyersHash(id);
+        vm.prank(BUYER);
+        dvp.settle(id, h);
+
+        (, bytes4 reason) = dvp.canSettle(id, h);
+        assertEq(reason, DvPSettlement.TradeNotOpen.selector);
+    }
+
+    function test_canSettle_reportsExpired() public {
+        uint256 id = _readyToSettle();
+        vm.warp(uint256(deadline) + 1);
+
+        (, bytes4 reason) = dvp.canSettle(id, _buyersHash(id));
+        assertEq(reason, DvPSettlement.TradeExpired.selector);
+        _assertPreviewMatchesReality(id, _buyersHash(id));
+    }
+
+    function test_canSettle_reportsTermsMismatch() public {
+        uint256 id = _readyToSettle();
+        bytes32 wrong = keccak256("not what I agreed");
+
+        (, bytes4 reason) = dvp.canSettle(id, wrong);
+        assertEq(reason, DvPSettlement.TermsMismatch.selector);
+        _assertPreviewMatchesReality(id, wrong);
+    }
+
+    function test_canSettle_reportsWrongInstrument() public {
+        registry.setApproved(SELLER, true);
+        registry.setTier(SELLER, Tier.INSTITUTIONAL);
+        registry.setApproved(BUYER, true);
+        registry.setTier(BUYER, Tier.INSTITUTIONAL);
+        DvPSettlement.Terms memory t = _terms();
+        t.isin = bytes12("DE000A1EWWX8");
+        vm.prank(SELLER);
+        uint256 id = dvp.propose(t);
+        bytes32 h = dvp.hashTerms(id, SELLER, t);
+
+        (, bytes4 reason) = dvp.canSettle(id, h);
+        assertEq(reason, DvPSettlement.WrongInstrument.selector);
+        _assertPreviewMatchesReality(id, h);
+    }
+
+    // -- the legs answer for themselves: the token's selector, not one of ours ---------------
+
+    function test_canSettle_reportsCashLegFrozenBuyer() public {
+        uint256 id = _readyToSettle();
+        vm.prank(OFFICER);
+        cash.freeze(BUYER, bytes32("SANCTIONS_HIT"));
+
+        (bool ok, bytes4 reason) = dvp.canSettle(id, _buyersHash(id));
+        assertFalse(ok);
+        assertEq(reason, TokenizedCash.SenderFrozen.selector);
+        _assertPreviewMatchesReality(id, _buyersHash(id));
+    }
+
+    function test_canSettle_reportsCashLegMissingAllowance() public {
+        uint256 id = _readyToSettle();
+        vm.prank(BUYER);
+        cash.approve(address(dvp), 0);
+
+        (, bytes4 reason) = dvp.canSettle(id, _buyersHash(id));
+        assertEq(reason, IERC20Errors.ERC20InsufficientAllowance.selector);
+        _assertPreviewMatchesReality(id, _buyersHash(id));
+    }
+
+    /// @dev Only the cash leg knows what a tier is. The settlement contract passes the
+    ///      buyer's limit failure through without understanding it (section 5).
+    function test_canSettle_reportsCashLegDailyLimit() public {
+        uint256 id = _readyToSettle();
+        uint256 noLimit = cash.NO_LIMIT(); // hoisted: a call, which would consume the prank
+        vm.prank(ADMIN);
+        cash.setTierLimits(Tier.INSTITUTIONAL, noLimit, CASH_AMOUNT - 1);
+
+        (, bytes4 reason) = dvp.canSettle(id, _buyersHash(id));
+        assertEq(reason, TokenizedCash.DailyLimitExceeded.selector);
+        _assertPreviewMatchesReality(id, _buyersHash(id));
+    }
+
+    function test_canSettle_reportsAssetLegFrozenSeller() public {
+        uint256 id = _readyToSettle();
+        vm.prank(OFFICER);
+        bond.freeze(SELLER, bytes32("COURT_ORDER"));
+
+        (, bytes4 reason) = dvp.canSettle(id, _buyersHash(id));
+        assertEq(reason, AssetToken.SenderFrozen.selector);
+        _assertPreviewMatchesReality(id, _buyersHash(id));
+    }
+
+    function test_canSettle_reportsAssetLegMissingAllowance() public {
+        uint256 id = _readyToSettle();
+        vm.prank(SELLER);
+        bond.approve(address(dvp), 0);
+
+        (, bytes4 reason) = dvp.canSettle(id, _buyersHash(id));
+        assertEq(reason, IERC20Errors.ERC20InsufficientAllowance.selector);
+        _assertPreviewMatchesReality(id, _buyersHash(id));
+    }
+
+    /// @dev Both legs would refuse; the cash leg is asked first, so its cause is the one
+    ///      named -- the same order settle would hit them (section 7).
+    function test_canSettle_cashLegOutranksAssetLeg() public {
+        uint256 id = _readyToSettle();
+        vm.startPrank(OFFICER);
+        cash.freeze(BUYER, bytes32("X"));
+        bond.freeze(SELLER, bytes32("X"));
+        vm.stopPrank();
+
+        (, bytes4 reason) = dvp.canSettle(id, _buyersHash(id));
+        assertEq(reason, TokenizedCash.SenderFrozen.selector);
+        _assertPreviewMatchesReality(id, _buyersHash(id));
+    }
+
+    /// @dev This contract's own checks come before either leg is asked, so a mismatched
+    ///      instruction is named as such even when a leg would also have refused.
+    function test_canSettle_ownChecksOutrankTheLegs() public {
+        uint256 id = _readyToSettle();
+        vm.prank(OFFICER);
+        cash.freeze(BUYER, bytes32("X"));
+        bytes32 wrong = keccak256("wrong");
+
+        (, bytes4 reason) = dvp.canSettle(id, wrong);
+        assertEq(reason, DvPSettlement.TermsMismatch.selector);
+    }
+
+    // -- the preview machinery itself -----------------------------------------------------
+
+    function test_previewSettle_revertsWithTheRealError() public {
+        uint256 id = _readyToSettle();
+        vm.warp(uint256(deadline) + 1);
+
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.TradeExpired.selector, id, deadline));
+        dvp.previewSettle(id, _buyersHash(id));
+    }
+
+    function test_previewSettle_returnsQuietlyWhenItWouldSucceed() public {
+        uint256 id = _readyToSettle();
+        dvp.previewSettle(id, _buyersHash(id));
+    }
+
+    // -- a leg this contract did not ship with (section 7) ---------------------------------
+
+    /// @dev A token that returns false rather than reverting must not settle silently.
+    function test_settle_refusesAFalseReturningCashLeg() public {
+        FalseReturningLeg bad = new FalseReturningLeg(EUR, bytes12(0));
+        DvPSettlement.Terms memory t = _terms();
+        t.cashToken = address(bad);
+        vm.prank(SELLER);
+        uint256 id = dvp.propose(t);
+        bytes32 h = dvp.hashTerms(id, SELLER, t);
+
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.TransferFailed.selector, address(bad)));
+        vm.prank(BUYER);
+        dvp.settle(id, h);
+
+        assertEq(uint8(dvp.trades(id).status), uint8(DvPSettlement.Status.PROPOSED), "status write rolled back");
+    }
+
+    function test_settle_refusesAFalseReturningAssetLeg() public {
+        uint256 id = _readyToSettle(); // real cash leg, funded and approved
+        FalseReturningLeg bad = new FalseReturningLeg(bytes3(0), ISIN);
+        DvPSettlement.Terms memory t = _terms();
+        t.assetToken = address(bad);
+        vm.prank(SELLER);
+        id = dvp.propose(t);
+        bytes32 h = dvp.hashTerms(id, SELLER, t);
+
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.TransferFailed.selector, address(bad)));
+        vm.prank(BUYER);
+        dvp.settle(id, h);
+
+        assertEq(cash.balanceOf(BUYER), CASH_AMOUNT, "the cash leg that had already run is rolled back");
     }
 }

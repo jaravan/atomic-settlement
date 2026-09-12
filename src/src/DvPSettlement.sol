@@ -235,20 +235,7 @@ contract DvPSettlement {
     ///      which both parties have agreed and nothing has moved (section 3).
     function settle(uint256 tradeId, bytes32 termsHash) external {
         Trade storage trade = _trades[tradeId];
-
-        // Local checks first, in the order canSettle mirrors, so the cheapest cause wins.
-        if (trade.status != Status.PROPOSED) revert TradeNotOpen(tradeId, trade.status);
-        if (msg.sender != trade.buyer) revert NotBuyer(tradeId, msg.sender);
-        if (block.timestamp > trade.deadline) revert TradeExpired(tradeId, trade.deadline);
-        if (termsHash != _storedHash(tradeId, trade)) revert TermsMismatch(tradeId);
-
-        // The addresses really are the instruments the trade names (section 6).
-        ICashLeg cash = ICashLeg(trade.cashToken);
-        IAssetLeg asset = IAssetLeg(trade.assetToken);
-        bytes3 currency = cash.currency();
-        if (currency != trade.currency) revert WrongCurrency(trade.cashToken, trade.currency, currency);
-        bytes12 isin = asset.isin();
-        if (isin != trade.isin) revert WrongInstrument(trade.assetToken, trade.isin, isin);
+        (ICashLeg cash, IAssetLeg asset) = _checkSettle(tradeId, trade, termsHash, msg.sender);
 
         // Effect before interactions: a token that called back in would find the trade
         // no longer PROPOSED (section 7).
@@ -263,6 +250,74 @@ contract DvPSettlement {
         emit TradeSettled(
             tradeId, trade.seller, trade.buyer, trade.cashToken, trade.cashAmount, trade.assetToken, trade.assetAmount
         );
+    }
+
+    /// @dev Everything settle checks before it touches a balance, in the order canSettle
+    ///      mirrors so the view names the cause the transaction would. Returns the two legs.
+    function _checkSettle(uint256 tradeId, Trade storage trade, bytes32 termsHash, address caller)
+        private
+        view
+        returns (ICashLeg cash, IAssetLeg asset)
+    {
+        if (trade.status != Status.PROPOSED) revert TradeNotOpen(tradeId, trade.status);
+        if (caller != trade.buyer) revert NotBuyer(tradeId, caller);
+        if (block.timestamp > trade.deadline) revert TradeExpired(tradeId, trade.deadline);
+        if (termsHash != _storedHash(tradeId, trade)) revert TermsMismatch(tradeId);
+
+        // The addresses really are the instruments the trade names (section 6).
+        cash = ICashLeg(trade.cashToken);
+        asset = IAssetLeg(trade.assetToken);
+        bytes3 currency = cash.currency();
+        if (currency != trade.currency) revert WrongCurrency(trade.cashToken, trade.currency, currency);
+        bytes12 isin = asset.isin();
+        if (isin != trade.isin) revert WrongInstrument(trade.assetToken, trade.isin, isin);
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Previewing a settlement (section 5)
+    // ---------------------------------------------------------------------------------
+
+    /// @notice Whether `settle` would succeed right now, were the named buyer to call it.
+    /// @dev Makes no registry call of its own: each token answers for its leg through its
+    ///      own preview, so there is no second copy of the compliance rules here.
+    /// @return ok True if it would go through.
+    /// @return reason The selector of the error it would revert with, or 0 when `ok`.
+    function canSettle(uint256 tradeId, bytes32 termsHash) external view returns (bool ok, bytes4 reason) {
+        try this.previewSettle(tradeId, termsHash) {
+            return (true, bytes4(0));
+        } catch (bytes memory err) {
+            return (false, _selectorOf(err));
+        }
+    }
+
+    /// @notice Reverts with the error a real `settle` would, assuming the buyer calls it.
+    /// @dev Machinery for `canSettle`: this contract's own checks, then the cash leg, then
+    ///      the asset leg -- the order settle would hit them.
+    function previewSettle(uint256 tradeId, bytes32 termsHash) external view {
+        Trade storage trade = _trades[tradeId];
+        (ICashLeg cash, IAssetLeg asset) = _checkSettle(tradeId, trade, termsHash, trade.buyer);
+
+        (bool ok, bytes4 reason) = cash.canTransferFrom(address(this), trade.buyer, trade.seller, trade.cashAmount);
+        if (!ok) _revertWith(reason);
+
+        (ok, reason) = asset.canTransferFrom(address(this), trade.seller, trade.buyer, trade.assetAmount);
+        if (!ok) _revertWith(reason);
+    }
+
+    /// @dev Re-raise a leg's answer as a revert carrying just the selector.
+    function _revertWith(bytes4 selector) private pure {
+        assembly ("memory-safe") {
+            mstore(0, selector)
+            revert(0, 4)
+        }
+    }
+
+    /// @dev The leading four bytes of returndata, or zero if there are not four to take.
+    function _selectorOf(bytes memory err) private pure returns (bytes4 selector) {
+        if (err.length < 4) return bytes4(0);
+        assembly ("memory-safe") {
+            selector := mload(add(err, 0x20))
+        }
     }
 
     /// @dev The stored record, hashed exactly as `hashTerms` would hash the buyer's copy.
