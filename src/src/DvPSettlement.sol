@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity 0.8.30;
 
+import {ICashLeg, IAssetLeg} from "./interfaces/ISettlementLegs.sol";
+
 /// @title DvPSettlement
 /// @notice One transaction that moves both legs of a trade, or neither. Holds no balances
 ///         and takes no custody: cash moves buyer to seller and the bond seller to buyer,
@@ -73,6 +75,25 @@ contract DvPSettlement {
     /// @notice The caller is not the party the action belongs to.
     error NotSeller(uint256 tradeId, address caller);
 
+    /// @notice Only the named buyer can settle: a proposal is addressed to one party.
+    error NotBuyer(uint256 tradeId, address caller);
+
+    /// @notice The deadline has passed. The record stays, harmless and unusable.
+    error TradeExpired(uint256 tradeId, uint64 deadline);
+
+    /// @notice The buyer's hash does not match the stored terms: the two instructions differ.
+    error TermsMismatch(uint256 tradeId);
+
+    /// @notice The cash token at the recorded address is not the currency the trade names.
+    error WrongCurrency(address token, bytes3 expected, bytes3 actual);
+
+    /// @notice The asset token at the recorded address is not the instrument the trade names.
+    error WrongInstrument(address token, bytes12 expected, bytes12 actual);
+
+    /// @notice A leg returned false instead of reverting. Neither of ours does; this is for
+    ///         a token this contract did not ship with (section 7).
+    error TransferFailed(address token);
+
     // ---------------------------------------------------------------------------------
     // Events (section 8)
     // ---------------------------------------------------------------------------------
@@ -87,6 +108,18 @@ contract DvPSettlement {
         address assetToken,
         uint256 assetAmount,
         uint64 deadline
+    );
+
+    /// @notice Both legs moved. Terms repeated rather than referenced, so a reconciliation
+    ///         reading settlements alone can describe each one (section 8).
+    event TradeSettled(
+        uint256 indexed tradeId,
+        address indexed seller,
+        address indexed buyer,
+        address cashToken,
+        uint256 cashAmount,
+        address assetToken,
+        uint256 assetAmount
     );
 
     /// @notice The seller withdrew its instruction. No reason: a party withdrawing its own
@@ -171,8 +204,7 @@ contract DvPSettlement {
 
     /// @notice The hash a buyer passes to `settle`, computed from the buyer's own record of
     ///         the trade -- never from reading the proposal back and hashing that.
-    /// @dev Binds the terms to one trade on one deployment on one chain: the same terms
-    ///      under another id, contract or chain hash differently, so a hash is worthless
+    /// @dev Bound to one trade on one deployment on one chain, so a hash is worthless
     ///      against any trade but the one it was made for.
     function hashTerms(uint256 tradeId, address seller, Terms memory terms) public view returns (bytes32) {
         return keccak256(
@@ -190,6 +222,64 @@ contract DvPSettlement {
                 terms.assetAmount,
                 terms.deadline
             )
+        );
+    }
+
+    // ---------------------------------------------------------------------------------
+    // Settling (sections 2, 3, 4, 6, 7)
+    // ---------------------------------------------------------------------------------
+
+    /// @notice Execute a trade. The named buyer only, asserting the terms it agreed as a
+    ///         hash. Both legs move in this transaction, or neither does.
+    /// @dev Acceptance and execution are one call: splitting them would open a window in
+    ///      which both parties have agreed and nothing has moved (section 3).
+    function settle(uint256 tradeId, bytes32 termsHash) external {
+        Trade storage trade = _trades[tradeId];
+
+        // Local checks first, in the order canSettle mirrors, so the cheapest cause wins.
+        if (trade.status != Status.PROPOSED) revert TradeNotOpen(tradeId, trade.status);
+        if (msg.sender != trade.buyer) revert NotBuyer(tradeId, msg.sender);
+        if (block.timestamp > trade.deadline) revert TradeExpired(tradeId, trade.deadline);
+        if (termsHash != _storedHash(tradeId, trade)) revert TermsMismatch(tradeId);
+
+        // The addresses really are the instruments the trade names (section 6).
+        ICashLeg cash = ICashLeg(trade.cashToken);
+        IAssetLeg asset = IAssetLeg(trade.assetToken);
+        bytes3 currency = cash.currency();
+        if (currency != trade.currency) revert WrongCurrency(trade.cashToken, trade.currency, currency);
+        bytes12 isin = asset.isin();
+        if (isin != trade.isin) revert WrongInstrument(trade.assetToken, trade.isin, isin);
+
+        // Effect before interactions: a token that called back in would find the trade
+        // no longer PROPOSED (section 7).
+        trade.status = Status.SETTLED;
+
+        // Cash first: it carries more checks, so it is the leg likelier to refuse.
+        if (!cash.transferFrom(trade.buyer, trade.seller, trade.cashAmount)) revert TransferFailed(trade.cashToken);
+        if (!asset.transferFrom(trade.seller, trade.buyer, trade.assetAmount)) {
+            revert TransferFailed(trade.assetToken);
+        }
+
+        emit TradeSettled(
+            tradeId, trade.seller, trade.buyer, trade.cashToken, trade.cashAmount, trade.assetToken, trade.assetAmount
+        );
+    }
+
+    /// @dev The stored record, hashed exactly as `hashTerms` would hash the buyer's copy.
+    function _storedHash(uint256 tradeId, Trade storage trade) private view returns (bytes32) {
+        return hashTerms(
+            tradeId,
+            trade.seller,
+            Terms({
+                buyer: trade.buyer,
+                cashToken: trade.cashToken,
+                currency: trade.currency,
+                cashAmount: trade.cashAmount,
+                assetToken: trade.assetToken,
+                isin: trade.isin,
+                assetAmount: trade.assetAmount,
+                deadline: trade.deadline
+            })
         );
     }
 }

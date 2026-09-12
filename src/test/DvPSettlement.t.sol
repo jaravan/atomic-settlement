@@ -2,17 +2,30 @@
 pragma solidity 0.8.30;
 
 import {Test} from "forge-std/Test.sol";
+import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
+import {IKYCRegistryV2, Tier} from "kyc-registry/interfaces/IKYCRegistryV2.sol";
 import {DvPSettlement} from "../src/DvPSettlement.sol";
+import {TokenizedCash} from "../src/TokenizedCash.sol";
+import {AssetToken} from "../src/AssetToken.sol";
+import {MockKYCRegistry} from "./mocks/MockKYCRegistry.sol";
 
-/// @notice Steps 1-3: recording and withdrawing a proposal, and the terms hash.
+/// @notice Steps 1-4: proposing, cancelling, the terms hash, and settling.
 contract DvPSettlementTest is Test {
     DvPSettlement internal dvp;
+    MockKYCRegistry internal registry;
+    TokenizedCash internal cash;
+    AssetToken internal bond;
 
     address internal constant SELLER = address(0x5E11);
     address internal constant BUYER = address(0xB0BB);
     address internal constant STRANGER = address(0x5747);
-    address internal constant CASH = address(0xCA54);
-    address internal constant BOND = address(0xB0BD);
+    address internal constant ADMIN = address(0xA11CE);
+    address internal constant ISSUER = address(0x155);
+    address internal constant OFFICER = address(0x0FF);
+
+    // Set in setUp; the propose/cancel/hash tests only need them as addresses.
+    address internal CASH;
+    address internal BOND;
 
     bytes3 internal constant EUR = bytes3("EUR");
     bytes12 internal constant ISIN = bytes12("DE000A1EWWW0");
@@ -24,7 +37,69 @@ contract DvPSettlementTest is Test {
     function setUp() public {
         vm.warp(1_700_000_000);
         deadline = uint64(block.timestamp + 1 days);
+
+        registry = new MockKYCRegistry();
+        cash = new TokenizedCash("Tokenized Euro", "tEUR", EUR, IKYCRegistryV2(address(registry)), ADMIN);
+        bond = new AssetToken("Bund 2035", "BUND35", ISIN, IKYCRegistryV2(address(registry)), ADMIN);
         dvp = new DvPSettlement();
+        CASH = address(cash);
+        BOND = address(bond);
+
+        bytes32 cashIssuer = cash.ISSUER_ROLE();
+        bytes32 cashOfficer = cash.COMPLIANCE_OFFICER_ROLE();
+        bytes32 bondIssuer = bond.ISSUER_ROLE();
+        bytes32 bondOfficer = bond.COMPLIANCE_OFFICER_ROLE();
+        vm.startPrank(ADMIN);
+        cash.grantRole(cashIssuer, ISSUER);
+        cash.grantRole(cashOfficer, OFFICER);
+        cash.setTierLimits(Tier.INSTITUTIONAL, cash.NO_LIMIT(), cash.NO_LIMIT());
+        bond.grantRole(bondIssuer, ISSUER);
+        bond.grantRole(bondOfficer, OFFICER);
+        vm.stopPrank();
+    }
+
+    /// @dev Both parties onboarded as institutions, funded, and with the allowances a
+    ///      settlement needs: the seller's on the bond, the buyer's on the cash.
+    function _readyToSettle() private returns (uint256 id) {
+        registry.setApproved(SELLER, true);
+        registry.setTier(SELLER, Tier.INSTITUTIONAL);
+        registry.setApproved(BUYER, true);
+        registry.setTier(BUYER, Tier.INSTITUTIONAL);
+
+        vm.startPrank(ISSUER);
+        cash.mint(BUYER, CASH_AMOUNT);
+        bond.mint(SELLER, BOND_AMOUNT);
+        vm.stopPrank();
+
+        vm.prank(SELLER);
+        bond.approve(address(dvp), BOND_AMOUNT);
+        vm.prank(BUYER);
+        cash.approve(address(dvp), CASH_AMOUNT);
+
+        vm.prank(SELLER);
+        id = dvp.propose(_terms());
+    }
+
+    /// @dev What the buyer computes from its own record (section 2) -- locally, not via the
+    ///      contract. Also keeps this an in-process read, so it cannot consume a vm.prank.
+    function _buyersHash(uint256 id) private view returns (bytes32) {
+        DvPSettlement.Terms memory t = _terms();
+        return keccak256(
+            abi.encode(
+                block.chainid,
+                address(dvp),
+                id,
+                SELLER,
+                t.buyer,
+                t.cashToken,
+                t.currency,
+                t.cashAmount,
+                t.assetToken,
+                t.isin,
+                t.assetAmount,
+                t.deadline
+            )
+        );
     }
 
     function _terms() private view returns (DvPSettlement.Terms memory) {
@@ -402,5 +477,302 @@ contract DvPSettlementTest is Test {
         bytes32 here = dvp.hashTerms(1, SELLER, _terms());
         vm.chainId(999);
         assertTrue(dvp.hashTerms(1, SELLER, _terms()) != here);
+    }
+
+    // -- settle: both legs move, or neither (sections 1, 3) --------------------------------
+
+    function test_settle_movesBothLegs() public {
+        uint256 id = _readyToSettle();
+
+        vm.prank(BUYER);
+        dvp.settle(id, _buyersHash(id));
+
+        assertEq(cash.balanceOf(SELLER), CASH_AMOUNT, "seller received the cash");
+        assertEq(cash.balanceOf(BUYER), 0);
+        assertEq(bond.balanceOf(BUYER), BOND_AMOUNT, "buyer received the bonds");
+        assertEq(bond.balanceOf(SELLER), 0);
+        assertEq(uint8(dvp.trades(id).status), uint8(DvPSettlement.Status.SETTLED));
+    }
+
+    /// @dev The contract holds nothing, before, during or after (section 1).
+    function test_settle_contractNeverHoldsEitherLeg() public {
+        uint256 id = _readyToSettle();
+
+        vm.prank(BUYER);
+        dvp.settle(id, _buyersHash(id));
+
+        assertEq(cash.balanceOf(address(dvp)), 0);
+        assertEq(bond.balanceOf(address(dvp)), 0);
+    }
+
+    function test_settle_emitsTermsInFull() public {
+        uint256 id = _readyToSettle();
+
+        vm.expectEmit(true, true, true, true);
+        emit DvPSettlement.TradeSettled(id, SELLER, BUYER, CASH, CASH_AMOUNT, BOND, BOND_AMOUNT);
+        vm.prank(BUYER);
+        dvp.settle(id, _buyersHash(id));
+    }
+
+    /// @dev Atomicity: if the second leg refuses, the first leg is rolled back too.
+    function test_settle_isAtomic_assetLegRefusalUndoesCashLeg() public {
+        uint256 id = _readyToSettle();
+        vm.prank(SELLER);
+        bond.approve(address(dvp), 0); // seller withdrew the bond allowance
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IERC20Errors.ERC20InsufficientAllowance.selector, address(dvp), 0, BOND_AMOUNT)
+        );
+        vm.prank(BUYER);
+        dvp.settle(id, _buyersHash(id));
+
+        assertEq(cash.balanceOf(BUYER), CASH_AMOUNT, "cash did not move");
+        assertEq(cash.balanceOf(SELLER), 0);
+        assertEq(uint8(dvp.trades(id).status), uint8(DvPSettlement.Status.PROPOSED), "still open");
+    }
+
+    /// @dev A failed settlement comes back with the token's own error, unchanged (section 5).
+    function test_settle_surfacesTheTokensOwnError() public {
+        uint256 id = _readyToSettle();
+        vm.prank(OFFICER);
+        cash.freeze(BUYER, bytes32("SANCTIONS_HIT"));
+
+        vm.expectRevert(abi.encodeWithSelector(TokenizedCash.SenderFrozen.selector, BUYER));
+        vm.prank(BUYER);
+        dvp.settle(id, _buyersHash(id));
+    }
+
+    // -- who may settle (section 3) --------------------------------------------------------
+
+    function test_settle_onlyTheNamedBuyer() public {
+        uint256 id = _readyToSettle();
+
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.NotBuyer.selector, id, STRANGER));
+        vm.prank(STRANGER);
+        dvp.settle(id, _buyersHash(id));
+
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.NotBuyer.selector, id, SELLER));
+        vm.prank(SELLER);
+        dvp.settle(id, _buyersHash(id));
+    }
+
+    // -- terminal states (section 3) --------------------------------------------------------
+
+    function test_settle_twiceReverts() public {
+        uint256 id = _readyToSettle();
+        vm.prank(BUYER);
+        dvp.settle(id, _buyersHash(id));
+
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.TradeNotOpen.selector, id, DvPSettlement.Status.SETTLED));
+        vm.prank(BUYER);
+        dvp.settle(id, _buyersHash(id));
+    }
+
+    function test_settle_cancelledReverts() public {
+        uint256 id = _readyToSettle();
+        vm.prank(SELLER);
+        dvp.cancel(id);
+
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.TradeNotOpen.selector, id, DvPSettlement.Status.CANCELLED));
+        vm.prank(BUYER);
+        dvp.settle(id, _buyersHash(id));
+    }
+
+    function test_settle_unassignedIdReverts() public {
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.TradeNotOpen.selector, 42, DvPSettlement.Status.NONE));
+        vm.prank(BUYER);
+        dvp.settle(42, bytes32(0));
+    }
+
+    function test_cancel_afterSettleReverts() public {
+        uint256 id = _readyToSettle();
+        vm.prank(BUYER);
+        dvp.settle(id, _buyersHash(id));
+
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.TradeNotOpen.selector, id, DvPSettlement.Status.SETTLED));
+        vm.prank(SELLER);
+        dvp.cancel(id);
+    }
+
+    // -- every proposal expires (section 4) --------------------------------------------------
+
+    function test_settle_atTheDeadlineSucceeds() public {
+        uint256 id = _readyToSettle();
+        vm.warp(deadline);
+
+        vm.prank(BUYER);
+        dvp.settle(id, _buyersHash(id));
+
+        assertEq(uint8(dvp.trades(id).status), uint8(DvPSettlement.Status.SETTLED));
+    }
+
+    function test_settle_oneSecondPastTheDeadlineReverts() public {
+        uint256 id = _readyToSettle();
+        vm.warp(uint256(deadline) + 1);
+
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.TradeExpired.selector, id, deadline));
+        vm.prank(BUYER);
+        dvp.settle(id, _buyersHash(id));
+    }
+
+    /// @dev Expiry costs no transaction: the record is still PROPOSED, just unusable.
+    function test_settle_expiredTradeStaysProposedInStorage() public {
+        uint256 id = _readyToSettle();
+        vm.warp(uint256(deadline) + 1);
+
+        assertEq(uint8(dvp.trades(id).status), uint8(DvPSettlement.Status.PROPOSED));
+    }
+
+    // -- two instructions must match (section 2) -------------------------------------------
+
+    function test_settle_wrongHashReverts() public {
+        uint256 id = _readyToSettle();
+
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.TermsMismatch.selector, id));
+        vm.prank(BUYER);
+        dvp.settle(id, keccak256("not what I agreed"));
+    }
+
+    /// @dev The seller typed one extra zero. The buyer, asserting what it actually agreed,
+    ///      is refused rather than paying ten times the price.
+    function test_settle_catchesSellersExtraZero() public {
+        registry.setApproved(SELLER, true);
+        registry.setTier(SELLER, Tier.INSTITUTIONAL);
+        registry.setApproved(BUYER, true);
+        registry.setTier(BUYER, Tier.INSTITUTIONAL);
+
+        DvPSettlement.Terms memory fat = _terms();
+        fat.cashAmount = CASH_AMOUNT * 10;
+        vm.prank(SELLER);
+        uint256 id = dvp.propose(fat);
+
+        bytes32 whatBuyerAgreed = dvp.hashTerms(id, SELLER, _terms());
+
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.TermsMismatch.selector, id));
+        vm.prank(BUYER);
+        dvp.settle(id, whatBuyerAgreed);
+    }
+
+    /// @dev Right terms, wrong id: proposals 47 and 48 on different terms, and the buyer
+    ///      settles the one it did not mean. The id is in the hash, so it is refused.
+    function test_settle_catchesWrongTradeId() public {
+        uint256 first = _readyToSettle();
+        DvPSettlement.Terms memory other = _terms();
+        other.cashAmount = CASH_AMOUNT / 2;
+        vm.prank(SELLER);
+        uint256 second = dvp.propose(other);
+
+        bytes32 hashForFirst = _buyersHash(first);
+
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.TermsMismatch.selector, second));
+        vm.prank(BUYER);
+        dvp.settle(second, hashForFirst);
+    }
+
+    // -- the addresses really are the instruments named (section 6) -------------------------
+
+    function test_settle_wrongCurrencyReverts() public {
+        registry.setApproved(SELLER, true);
+        registry.setTier(SELLER, Tier.INSTITUTIONAL);
+        registry.setApproved(BUYER, true);
+        registry.setTier(BUYER, Tier.INSTITUTIONAL);
+
+        // the seller names USD, but the address is the euro token
+        DvPSettlement.Terms memory t = _terms();
+        t.currency = bytes3("USD");
+        vm.prank(SELLER);
+        uint256 id = dvp.propose(t);
+
+        bytes32 h = dvp.hashTerms(id, SELLER, t); // hoisted: a call, which expectRevert would latch onto
+
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.WrongCurrency.selector, CASH, bytes3("USD"), EUR));
+        vm.prank(BUYER);
+        dvp.settle(id, h);
+    }
+
+    function test_settle_wrongInstrumentReverts() public {
+        registry.setApproved(SELLER, true);
+        registry.setTier(SELLER, Tier.INSTITUTIONAL);
+        registry.setApproved(BUYER, true);
+        registry.setTier(BUYER, Tier.INSTITUTIONAL);
+
+        // the seller names the 2040 issue, but the address is the 2035 token
+        DvPSettlement.Terms memory t = _terms();
+        t.isin = bytes12("DE000A1EWWX8");
+        vm.prank(SELLER);
+        uint256 id = dvp.propose(t);
+
+        bytes32 h = dvp.hashTerms(id, SELLER, t);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(DvPSettlement.WrongInstrument.selector, BOND, bytes12("DE000A1EWWX8"), ISIN)
+        );
+        vm.prank(BUYER);
+        dvp.settle(id, h);
+    }
+
+    /// @dev Both parties agreed perfectly on the wrong address: the hash matches, and the
+    ///      instrument check is what catches it. Two different controls (section 6).
+    function test_settle_hashMatchDoesNotExcuseWrongInstrument() public {
+        registry.setApproved(SELLER, true);
+        registry.setTier(SELLER, Tier.INSTITUTIONAL);
+        registry.setApproved(BUYER, true);
+        registry.setTier(BUYER, Tier.INSTITUTIONAL);
+
+        AssetToken other =
+            new AssetToken("Bund 2040", "BUND40", bytes12("DE000A1EWWX8"), IKYCRegistryV2(address(registry)), ADMIN);
+        DvPSettlement.Terms memory t = _terms();
+        t.assetToken = address(other); // both think this is the 2035 issue; it is not
+        vm.prank(SELLER);
+        uint256 id = dvp.propose(t);
+
+        bytes32 agreedHash = dvp.hashTerms(id, SELLER, t);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                DvPSettlement.WrongInstrument.selector, address(other), ISIN, bytes12("DE000A1EWWX8")
+            )
+        );
+        vm.prank(BUYER);
+        dvp.settle(id, agreedHash);
+    }
+
+    // -- check ordering: the same order canSettle will mirror -------------------------------
+
+    /// @dev Status is checked before the hash, so an unassigned id is named as such rather
+    ///      than as a mismatch against an empty record.
+    function test_settle_statusOutranksHash() public {
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.TradeNotOpen.selector, 42, DvPSettlement.Status.NONE));
+        vm.prank(BUYER);
+        dvp.settle(42, keccak256("anything"));
+    }
+
+    /// @dev Expiry is checked before the hash: a stale proposal is named as expired even
+    ///      when the buyer's hash would have matched.
+    function test_settle_expiryOutranksHash() public {
+        uint256 id = _readyToSettle();
+        vm.warp(uint256(deadline) + 1);
+
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.TradeExpired.selector, id, deadline));
+        vm.prank(BUYER);
+        dvp.settle(id, keccak256("wrong anyway"));
+    }
+
+    /// @dev The hash is checked before the tokens are touched, so a mismatched instruction
+    ///      never reaches a registry call.
+    function test_settle_hashOutranksInstrumentCheck() public {
+        registry.setApproved(SELLER, true);
+        registry.setTier(SELLER, Tier.INSTITUTIONAL);
+        registry.setApproved(BUYER, true);
+        registry.setTier(BUYER, Tier.INSTITUTIONAL);
+
+        DvPSettlement.Terms memory t = _terms();
+        t.currency = bytes3("USD"); // would fail WrongCurrency
+        vm.prank(SELLER);
+        uint256 id = dvp.propose(t);
+
+        vm.expectRevert(abi.encodeWithSelector(DvPSettlement.TermsMismatch.selector, id));
+        vm.prank(BUYER);
+        dvp.settle(id, keccak256("also wrong"));
     }
 }
