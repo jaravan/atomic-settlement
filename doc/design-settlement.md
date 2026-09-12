@@ -585,10 +585,51 @@ UUPS proxy and therefore each carrying a `delegatecall` hop. That is the number 
 decides whether the network meets its settlement window, and no token document could state
 it because neither sees both legs.
 
-**Not yet measured.** A `forge snapshot` committed to the repo and gated in CI, as both
-token documents promise. If seven round trips prove to be the bottleneck, the
-`complianceOf` getter discussed in [cash section 10](design-cash.md#10-gas) would fold
-them into two, and this is the measurement that should decide it.
+### Measured
+
+`test/Gas.t.sol` (`SettlementGasTest`), mock registry behind a `delegatecall` proxy, both
+parties `INSTITUTIONAL` at `NO_LIMIT`, receiving balances non-zero so every write is
+`nonzero -> nonzero`. `propose` and `settle` are separate transactions, as in production, so
+the trade record is cold when `settle` reads it. Base transaction cost excluded.
+
+| path                 |    cold |    warm |
+| -------------------- | ------: | ------: |
+| `propose`            | 155,703 | 146,384 |
+| `settle`             | 112,865 |  55,665 |
+| `cancel`             |       - |   4,217 |
+| `canSettle` (view)   |  79,826 |       - |
+
+**A settlement costs less than its two legs summed.** The cash and asset `transferFrom`
+measured alone come to 47,736 + 49,412 = 97,148 cold, and `settle` adds a status write, two
+immutable reads and its own dispatch on top -- yet lands at 112,865 rather than ~115,000.
+The second leg finds the registry proxy and both party accounts already warm from the
+first, and that saving is larger than this contract's bookkeeping.
+
+**`propose` is the expensive call, and it is all storage.** Six slots written `0 -> nonzero`
+at ~22,100 each is ~133,000 of the 155,703. The `Trade` struct is ordered so the small fields
+pack beside `seller` and `buyer`; the first draft used seven slots and cost 177,555. Six is
+the floor for four addresses and two full words.
+
+**Against the real registry** (`test/DvPSettlementRegistry.t.sol`): `settle` is **130,097**
+cold, 15% above the mock. This is the one place the mock understates. On a single transfer
+the two matched within 2% because the cold account access dominated; but the real registry
+costs ~1,700 more per call once warm -- a fuller `Record`, ERC-7201 slot hashing, and the
+real proxy's implementation `SLOAD` -- and a settlement makes seven calls of which six are
+warm. The production figure is the one to plan against.
+
+**Throughput.** ~151,000 gas per settlement as a whole transaction against the real
+registry. At a 30M block limit that is roughly **198 settlements per block**, each moving
+both legs of a trade. That is the number to hold against the settlement window.
+
+**The seven round trips are 35,908 of the 130,097** -- measured in isolation against the
+real registry (`test/RegistryRoundTrips.t.sol`), one cold call and six warm. That is 28% of
+a settlement, less than the accumulated intuition of the three documents suggested: after
+the first call the registry proxy is warm, and the remaining six are mostly `SLOAD`s.
+
+`complianceOf` would fold seven into two and save perhaps 25,000 of those 35,908 -- a
+ceiling of about **20% of a settlement**. Worth doing if 198 per block is not enough, and
+not before; and the number to compare against is the 60% that is the two ERC-20 transfers
+and this contract's own record, which no registry change touches.
 
 On a permissioned Besu network gas price is zero or near zero, so this is a throughput
 question rather than a cost one: gas per settlement sets settlements per block.

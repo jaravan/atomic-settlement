@@ -23,17 +23,19 @@ contract DvPSettlement {
     }
 
     /// @notice A settlement instruction. The seller writes it; the buyer executes it.
+    /// @dev Field order packs the record into six slots, the minimum for four addresses and
+    ///      two full words: the small fields ride alongside `seller` and `buyer`.
     struct Trade {
         address seller;
-        address buyer;
-        address cashToken;
-        uint256 cashAmount;
-        address assetToken;
-        uint256 assetAmount;
         bytes3 currency;
-        bytes12 isin;
         uint64 deadline;
         Status status;
+        address buyer;
+        bytes12 isin;
+        address cashToken;
+        address assetToken;
+        uint256 cashAmount;
+        uint256 assetAmount;
     }
 
     /// @notice The terms a seller states when proposing.
@@ -148,15 +150,15 @@ contract DvPSettlement {
 
         _trades[tradeId] = Trade({
             seller: msg.sender,
-            buyer: terms.buyer,
-            cashToken: terms.cashToken,
-            cashAmount: terms.cashAmount,
-            assetToken: terms.assetToken,
-            assetAmount: terms.assetAmount,
             currency: terms.currency,
-            isin: terms.isin,
             deadline: terms.deadline,
-            status: Status.PROPOSED
+            status: Status.PROPOSED,
+            buyer: terms.buyer,
+            isin: terms.isin,
+            cashToken: terms.cashToken,
+            assetToken: terms.assetToken,
+            cashAmount: terms.cashAmount,
+            assetAmount: terms.assetAmount
         });
 
         emit TradeProposed(
