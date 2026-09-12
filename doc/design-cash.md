@@ -1,18 +1,18 @@
 # Tokenized Cash — Design
 
-The cash leg: an ERC-20 representing commercial bank money, or a simplified CBDC, with
-compliance enforced by the contract itself rather than by the systems around it.
+The cash leg: an ERC-20 representing commercial bank money or a simplified wholesale CBDC,
+with compliance enforced by the contract itself.
 
-What the three contracts have to agree on — settlement risk, DvP, and why the contract in
-the middle of a settlement can never be KYC'd — is in [Design](DESIGN.md).
+What the three contracts share, including why the contract in the middle of a settlement
+can never be KYC'd, is in [Design](DESIGN.md).
 
 ---
 
 ## 1. Compliance state lives in the registry, not the token
 
-**Decision:** the token holds **no KYC state of its own**. Admission and classification are
-read from [`upgradeable-kyc-registry`](https://github.com/jaravan/upgradeable-kyc-registry)
-via `IKYCRegistryV2`.
+The token holds no KYC state of its own. Admission and classification are read from
+[`upgradeable-kyc-registry`](https://github.com/jaravan/upgradeable-kyc-registry) through
+`IKYCRegistryV2`:
 
 ```solidity
 function isApproved(address) external view returns (bool);   // approved, unexpired, unsanctioned
@@ -20,56 +20,27 @@ function isSanctioned(address) external view returns (bool);
 function tierOf(address) external view returns (Tier);       // UNSET, RETAIL, INSTITUTIONAL, CROSS_BORDER
 ```
 
-The registry's three tiers are exactly the classification this token needs, so it does not
-redefine them.
-
-**Rejected:** a local whitelist managed by a compliance officer role on this contract.
-
-- Duplicates state that already exists, and the duplicate drifts
-- An address sanctioned in the registry would keep transacting here until someone
-  remembered to mirror the change
-- Would need mirroring into every future contract on the network
-
-**Consequence:** `COMPLIANCE_OFFICER_ROLE` manages no whitelist. It manages freeze and
-unfreeze, which is the one token-specific control that has to be exercised urgently.
+A local whitelist was rejected: it duplicates state that already exists, and an address
+sanctioned in the registry would keep transacting here until someone mirrored the change.
+`COMPLIANCE_OFFICER_ROLE` therefore manages no whitelist, only freeze and unfreeze.
 
 ### The registry address is `immutable`
 
-Set in the constructor, never changeable.
-
-- The registry is UUPS-upgradeable, so its address is already stable across its own
-  upgrades. Repointing would only be needed for a full redeploy
-- Reading an `immutable` costs no `SLOAD`, and this is read three times on a plain
-  `transfer`, four on a `transferFrom` (section 10)
-- A settable address is a governance attack surface on the most security-critical
-  dependency: whoever can repoint it can point at a registry that approves everyone
-
-**Tradeoff:** if the registry is ever redeployed at a new address, this token is migrated
-rather than reconfigured. Consistent with it being non-upgradeable anyway.
+Set in the constructor, never changeable. The registry is UUPS-upgradeable, so its address
+is stable across its own upgrades; reading an immutable costs no `SLOAD` on a path that
+reads it three or four times (section 10); and a settable address would let whoever
+controls it point the token at a registry that approves everyone. If the registry is ever
+redeployed, this token is migrated rather than reconfigured.
 
 ### What `immutable` does not buy
 
-It fixes _which_ contract is asked, not _what that contract answers_. The registry is
-UUPS-upgradeable, so whoever holds its upgrade rights can ship an implementation where
-`isApproved` returns true for everyone. That is the same outcome as repointing this token
-at a hostile registry, reached through a door this contract does not control.
-
-Two consequences worth stating rather than discovering:
-
-- **This token inherits the registry's upgrade governance as its own trust root.** The
-  security of every check in section 3 is bounded by whatever multisig or timelock guards
-  `_authorizeUpgrade` over there. A reviewer assessing this token has to read that repo too;
-  pinning the submodule (see `.gitmodules` and Dependabot) is what keeps the version under
-  review explicit.
-- **It is an availability dependency, not only an integrity one.** A registry upgrade that
-  reverts or removes `tierOf` halts every transfer of this token, because section 4 requires
-  a tier and section 3 requires an approval. There is no local fallback and deliberately no
-  way to repoint, so the recovery path is a registry fix, not a token change.
-
-Neither is an argument for making the address settable — that adds a second door without
-closing the first, and the first at least sits behind a contract whose upgrade process is
-itself designed and reviewed. It is an argument for the two repos being governed as one
-system, and for the registry's admin keys being held at least as carefully as this token's.
+It fixes which contract is asked, not what that contract answers. Whoever holds the
+registry's upgrade rights can ship an implementation where `isApproved` returns true for
+everyone, so this token inherits the registry's upgrade governance as its trust root, and a
+review of this token has to include that repository at the pinned commit. The dependency
+is also an availability one: a registry upgrade that breaks `tierOf` halts every transfer,
+and with no way to repoint, the recovery path is a registry fix. The two repositories have
+to be governed as one system.
 
 ---
 
@@ -88,31 +59,25 @@ system, and for the registry's admin keys being held at least as carefully as th
           └──▶ PAUSER_ROLE               pause · unpause        whole contract HOT
 ```
 
-**Decision:** OpenZeppelin `AccessControl`, not `Ownable`. Issuance sits with treasury,
-freezes with compliance, the emergency stop with operations. Different teams, different
-approval chains; one key misrepresents how the institution works.
+OpenZeppelin `AccessControl`, not `Ownable`. Issuance sits with treasury, freezes with
+compliance, the emergency stop with operations; different teams with different approval
+chains.
 
-**Split by tempo, not only by team.** How fast a key must be reachable sets how hot it is
-stored, and a hot key's powers should be as narrow as the job allows. An incident or a
-sanctions hit has to be actionable in minutes; a role change does not.
+The split is also by tempo. A sanctions hit or an incident has to be actionable in minutes,
+so freeze and pause are hot keys, and a hot key's powers should be as narrow as the job
+allows. Tier limits are set by admin rather than by the compliance officer for that reason:
+limit policy is network-wide and changes rarely, and a compromised hot key that could raise
+every tier's cap would have a much larger blast radius than one that can freeze an address.
+A fifth role for limits was rejected as a dedicated key for a setter called once a year.
 
-**So limits are configured by admin, not by compliance.** Freezing is urgent and
-per-address; limit policy is network-wide and changes perhaps once a year. Bundled, one
-compromised hot key could raise every tier's cap and silently disable the mechanism section
-4 exists to build — a far larger blast radius than freezing an address.
-
-**Rejected:** a fifth role for limits. A dedicated key for a setter called once a year is
-ceremony, not control. The cost is that admin is no longer purely a role-granting root.
-
-**The separation is procedural, not cryptographic.** Admin can grant itself any role and
-then mint, freeze or pause. What the split buys is that the grant happens first, as a
-visible on-chain event; it does not make the other roles independent of admin.
+The separation is procedural, not cryptographic. Admin can grant itself any role and then
+mint, freeze or pause. What the split buys is that the grant happens first, as a visible
+on-chain event.
 
 **Deployment constraint:** `ISSUER_ROLE` and `COMPLIANCE_OFFICER_ROLE` must be held by
-different parties, or the two-key control in section 9 reduces to a single actor. The
-contract enforces the _sequence_ — `burnFrom` reverts unless a freeze is already in place —
-but it cannot tell whether the two roles sit with the same person. The deploy script should
-assert it.
+different parties, or the two-key control in section 9 collapses to one actor. The contract
+enforces the sequence (`burnFrom` reverts unless a freeze is in place) but cannot tell
+whether both roles sit with the same person. The deploy script asserts it.
 
 ---
 
@@ -133,33 +98,25 @@ transferFrom   spender        directs the move, never holds the money
                not frozen
 ```
 
-**The spender is not required to be `isApproved`.** It cannot be: on a settlement the
-spender is a contract, and a contract can never be approved in the registry
-(see [_Scope_](DESIGN.md#scope)). Requiring it would fail every settlement, not just some.
+**The spender is not required to be `isApproved`.** On a settlement the spender is a
+contract, and a contract cannot be approved in the registry
+([Design](DESIGN.md#scope)). Requiring it would fail every settlement.
 
-**But sanctions are still checked on the spender.** A sanctioned party must not be able to
-_direct_ money even when it holds none. The two checks differ in kind: `isSanctioned` is a
-network-level block by the operator and can apply to any address at all, while `isApproved`
-is an onboarding statement by one member's compliance team and can only be true for someone
-that member onboarded. For an address that is nobody's customer, only the first means
-anything.
-
-Checking it costs nothing when it does not apply. The contract cannot tell a settlement
-contract from a custodian or broker acting for a client: on the first the check passes
-trivially, on the second — a real party with real sanctions exposure — it is the whole
-point.
+**The spender is still checked for sanctions.** A sanctioned party must not be able to
+direct money even when it holds none. `isSanctioned` is a network-level block that can
+apply to any address, where `isApproved` is an onboarding statement that can only be true
+for someone's customer. On a settlement contract the check passes trivially; on a custodian
+acting for a client it matters, and the token cannot tell the two apart.
 
 **Where the check lives.** OpenZeppelin routes `transfer` and `transferFrom` through
-`_update`. The spender check does not go there, because on a direct `transfer` the spender
-_is_ the sender, and `isApproved(from)` already implies not sanctioned. It goes on
-`transferFrom` alone, so direct payments never pay for it:
+`_update`. The spender check goes on `transferFrom` alone, because on a direct `transfer`
+the spender is the sender and `isApproved(from)` already implies not sanctioned:
 
 ```solidity
-// Runs for transfer, transferFrom, mint and burn. The sender side is guarded only when the
-// money is going somewhere -- a burn (to == 0) skips it; see below.
+// Runs for transfer, transferFrom, mint and burn.
 function _update(address from, address to, uint256 value) internal override {
     if (from != address(0) && to != address(0)) {/* isApproved(from), not frozen, tier limit */}
-    if (to != address(0)) {/* isApproved(to) -- also covers the mint recipient */}
+    if (to != address(0)) {/* isApproved(to), which also covers the mint recipient */}
     super._update(from, to, value);
 }
 
@@ -170,25 +127,15 @@ function transferFrom(address from, address to, uint256 value) public override r
 }
 ```
 
-**Why a burn skips the sender-side checks.** Those checks exist to stop money reaching a
-party who should not have it. A burn delivers to nobody: the balance leaves circulation and
-total supply falls. There is no counterparty to protect, and `address(0)` has no tier to
-look up, so mint and burn are outside the tier limits either way — supply is governed by
-`ISSUER_ROLE` (section 7), not by them.
-
-Skipping them is also what makes `burnFrom` possible at all. Its target is frozen by
-requirement and, in the case that matters, sanctioned as well; running `isApproved(from)`
-and the freeze check on a burn would make the function revert in exactly the circumstances
-it exists for. Nothing is loosened by this. `_update` was never what stopped an arbitrary
-holder from burning — there is no public burn entry point, and both burn paths are
-`ISSUER_ROLE`.
+**A burn skips the sender-side checks.** A burn delivers to nobody, so there is no
+counterparty to protect, and `burnFrom` targets an account that is frozen and usually
+sanctioned, so `isApproved(from)` would fail exactly when the function is needed. There is
+no public burn entry point; both burn paths are `ISSUER_ROLE` (section 7).
 
 ### Previewing the checks
 
-The rules above are enforced when a transfer runs. A caller often needs the answer before
-that, and a settlement contract needs it most of all: it cannot ask the registry itself
-without duplicating this section
-([settlement section 5](design-settlement.md#5-compliance-stays-in-the-tokens)).
+The settlement contract needs to know whether a transfer would succeed without asking the
+registry itself ([settlement section 5](design-settlement.md#5-compliance-stays-in-the-tokens)).
 
 ```solidity
 function canTransfer(address from, address to, uint256 value)
@@ -197,47 +144,32 @@ function canTransferFrom(address spender, address from, address to, uint256 valu
     external view returns (bool ok, bytes4 reason);
 ```
 
-Two functions because the two paths check different things: only `transferFrom` looks at
-the spender, and only it consults an allowance. Mirroring the split means a caller never
-has to invent a spender to ask about a plain payment.
-
-**The preview and the enforcement are the same predicate.** One internal function decides;
-`_update` and `transferFrom` revert on what it returns, and these two hand it back
-unchanged. A preview written separately would be a second copy of the rules in the one
-place nobody would notice it drifting.
-
-**`reason` is the selector of the error the real call would revert with**, not a code of
-our own. There is then nothing to keep in step: the vocabulary is the error list itself.
-The balance and allowance checks are included, so a caller gets the whole answer rather
-than the compliance half of it.
-
-These are views over state that can change in the next block. They answer "would this work
-now", which is what an operator needs before submitting, not a guarantee.
+Two functions because only `transferFrom` has a spender and an allowance. The preview and
+the enforcement run the same internal predicate, so they cannot drift. `reason` is the
+selector of the error the real call would revert with; there is no separate vocabulary to
+keep in step. Balance and allowance are included so the caller gets the whole answer. These
+are views over state that can change in the next block.
 
 ### Freezing does not clear allowances
 
-A freeze blocks outbound transfers, so `transferFrom` from a frozen account reverts. The
-allowance itself stays put, unusable until the freeze lifts.
-
-**Rejected:** deleting allowances on freeze. They cannot be enumerated on-chain, so it
-could only ever be done for the ones someone happens to name. And freeze is a hot-key
-action (section 2): blocking transfers is reversible, deleting approvals is not, so a
-mistaken or compromised freeze would force the account to rebuild every counterparty
-relationship.
+A freeze blocks outbound transfers, so `transferFrom` from a frozen account reverts and
+the allowance sits unusable until the freeze lifts. Allowances cannot be enumerated
+on-chain, and freeze is a hot-key action (section 2): blocking transfers is reversible,
+deleting approvals is not.
 
 ---
 
 ## 4. Transfer limits
 
-Two caps per tier, set by `DEFAULT_ADMIN_ROLE` (section 2): one per transaction, one per
-calendar day. The per-transaction cap is a single comparison. The daily cap needs state.
+Two caps per tier, set by `DEFAULT_ADMIN_ROLE`: one per transaction, one per calendar day.
+The per-transaction cap is a comparison. The daily cap needs state.
 
-**Chosen: a fixed calendar-day window.** Each sender carries a day number and a running
-total. If the current day differs from the stored one the total resets; otherwise the
-amount is added and checked against the tier's cap.
+**A fixed calendar-day window.** Each sender carries a day number and a running total. If
+the current day differs from the stored one the total resets; otherwise the amount is added
+and checked against the cap.
 
 ```
-if (dailyLimit != NO_LIMIT) {                                  // see "A cap can be set to no cap"
+if (dailyLimit != NO_LIMIT) {
     today = block.timestamp / 1 days
     if (usage.day != today) { usage.day = today; usage.spent = 0; }
     require(usage.spent + amount <= dailyLimit);
@@ -245,194 +177,116 @@ if (dailyLimit != NO_LIMIT) {                                  // see "A cap can
 }
 ```
 
-O(1), no loops, one storage slot: a `uint40` day number and a `uint216` total pack into 256
-bits.
+O(1), one storage slot: a `uint40` day number and a `uint216` total pack into 256 bits.
 
-**A calendar day is the intended meaning, not a compromise.** A sender can use one day's
-allowance late and the next day's early, moving twice the cap either side of midnight. That
-is two days' limits used on two days. Card schemes, payment mandates and AML aggregation
-thresholds are all written per calendar day, and this follows them.
+A sender can use one day's allowance late and the next day's early. That is two days'
+limits used on two days, which is what card schemes and AML aggregation thresholds mean by
+a daily limit. The day is UTC: the rules are written for a local business day, but on a
+multi-timezone network there is no single local day, and UTC is the one boundary every
+participant computes identically.
 
-**The day is UTC.** `block.timestamp / 1 days` counts days from the Unix epoch, so the
-window rolls at 00:00 UTC for every holder regardless of where they are. The rules being
-followed here are written for a local business day, so on a network whose participants sit
-in one timezone this is off by the local UTC offset, and on a network spanning several there
-is no single answer to be off from. A local day would mean either a per-holder offset — more
-state on the hot path, set by whom? — or a network-wide one, which is the same arbitrary
-choice as UTC but harder to reason about from a block explorer. UTC is chosen because it is
-the one boundary every participant computes identically.
-
-**Rejected: a rolling 24-hour window.** A different control, and not the one specified
-here. Enforcing it exactly means storing every `(timestamp, amount)` and pruning on each
-transfer: unbounded storage, gas that scales with how busy a sender has been, and a cheap
-way to inflate a victim's future costs. Unbounded loops in a transfer path are
-disqualifying. Approximations avoid the loop but add arithmetic to every transfer and a
-margin of error in both directions — to enforce a rule no regulation states.
+A rolling 24-hour window was rejected. Enforcing it exactly means storing every
+`(timestamp, amount)` and pruning on each transfer: unbounded storage and gas that scales
+with how busy a sender has been. Approximations avoid the loop but add error in both
+directions to enforce a rule no regulation states.
 
 ### Limits are set per tier, never per address
 
 One limit pair per tier, no per-address override. The entire policy is three entries,
-readable in full: anyone can answer "what are our limits" from the contract without
-enumerating holders. Per-address overrides scatter that policy across as many slots as
-there are addresses, so nobody can see it whole again — and an override is a quiet way to
-exempt one party, where a tier change is visible, attributed to the registry's KYC officer,
-and reviewable. A customer who genuinely needs different limits is a classification
-question: reclassify them, or argue for a new tier.
-
-**Interface consequence:** the setter takes a `Tier`, not an `address`. Adding per-address
-overrides later would be additive, so nothing here forecloses it.
+readable in full. An override is a quiet way to exempt one party, where a tier change is
+visible and attributed to the registry's KYC officer. A customer who needs different limits
+is a classification question. The setter takes a `Tier`, not an `address`.
 
 ### A cap can be set to no cap
 
-Limits are enforced on `from`, and on a settlement `from` is the paying bank — the
-settlement contract is only the spender. So a DvP trade consumes the payer's daily
-allowance, and it consumes it in one transaction. A wholesale settlement is routinely larger
-than any figure that would be a meaningful daily limit for a person, which leaves the token
-with a choice between capping the use case it was built for and setting a number so large it
-only pretends to be a control.
+On a settlement `from` is the paying bank, and a wholesale settlement is larger than any
+meaningful daily limit for a person. A tier whose cap is `NO_LIMIT` (`type(uint256).max`)
+is uncapped, and the contract skips both the comparison and the storage write. Reading the
+policy back gives `NO_LIMIT` rather than a large number nobody can tell from a typo.
 
-**Chosen: an explicit `NO_LIMIT` sentinel.** A tier whose cap is set to `NO_LIMIT`
-(`type(uint256).max`) is uncapped, and the contract skips both the comparison and the
-storage write for that tier — an uncapped sender never pays for the accumulator it does not
-use. The point is legibility: reading the policy back gives `NO_LIMIT` rather than
-`999,999,999,000000`, so nobody has to judge whether a very large number was a decision or a
-typo.
+**Zero means zero.** An unconfigured tier reads as `0` and cannot transfer. The sentinel is
+at the opposite end of the range from the default so that forgetting to configure a tier
+blocks transfers rather than uncapping them.
 
-**Zero means zero, so the contract fails closed.** An unconfigured tier reads as `0` and
-cannot transfer at all. The sentinel is at the opposite end of the range from the default
-precisely so that forgetting to configure a tier blocks transfers rather than silently
-uncapping them.
+The cap means different things at different tiers:
 
-**The cap means different things at different tiers**, and the doc should say so rather than
-implying one uniform control:
-
-- **`RETAIL`** — a genuine AML threshold. Binding, sized to the rules being followed, and
-  the reason the mechanism exists at all.
-- **`INSTITUTIONAL`** — normally `NO_LIMIT`. A daily cap on a settlement bank is not an AML
-  control; if it binds at all it binds on a legitimate trade, and the failure mode is a
-  failed settlement rather than a prevented crime. Where an operator does set one, it is a
-  circuit breaker against runaway automation, and it should be sized as one.
-- **`CROSS_BORDER`** — the operator's call, and the one tier where a cap may be doing real
-  sanctions or capital-control work rather than fraud control.
-
-**Consequence for the settlement contract:** a trade can still revert on the payer's limit
-if an operator caps `INSTITUTIONAL`. That is a policy failure, not a protocol one, and it
-surfaces as the limit error rather than as a mysterious settlement failure — which is the
-argument for a distinct error per cause throughout this document.
+- **`RETAIL`**: an AML threshold, binding, and the reason the mechanism exists.
+- **`INSTITUTIONAL`**: normally `NO_LIMIT`. A daily cap on a settlement bank is not an AML
+  control; if it binds, it binds on a legitimate trade. Where an operator sets one it is a
+  circuit breaker against runaway automation and should be sized as one.
+- **`CROSS_BORDER`**: the operator's call, and the one tier where a cap may be doing
+  sanctions or capital-control work.
 
 ### An `UNSET` tier reverts
 
-Limits come from the tier, so a transfer needs one. If `tierOf(from)` is `UNSET` the
-transfer reverts with its own error rather than falling back to a default.
-
-Falling back to the strictest tier would let an unclassified address transact at a limit
-nobody assigned it — enforcement in appearance, a default in fact. The registry already
-says an unclassified address must not silently read as `RETAIL`, and a distinct error keeps
-the cause legible: "no tier" is an onboarding problem, not a compliance breach.
-
-**Consequence:** `isApproved` alone is not enough to transact — onboarding must set a tier
-as well.
+If `tierOf(from)` is `UNSET` the transfer reverts with `TierUnset`. Falling back to the
+strictest tier would let an unclassified address transact at a limit nobody assigned it.
+`isApproved` alone is not enough to transact; onboarding must set a tier as well.
 
 ---
 
 ## 5. Freeze
 
-**Decision:** `COMPLIANCE_OFFICER_ROLE` can freeze any address. A frozen address **cannot
-send** but **can still receive** — matching how a frozen bank account behaves: incoming
-payments land, the holder cannot move anything out. Blocking inbound would strand funds
-already in flight and let a freeze fail an unrelated counterparty's settlement.
+`COMPLIANCE_OFFICER_ROLE` can freeze any address. A frozen address cannot send but can
+still receive, which is how a frozen bank account behaves. Blocking inbound would strand
+funds already in flight and let a freeze fail an unrelated counterparty's settlement.
 
-**Freeze and unfreeze emit a `bytes32` reason code**, not a string: one word instead of
-unbounded calldata, and it forces an enumerated set a compliance system can query rather
-than free text only a human can read.
+Freeze and unfreeze emit a `bytes32` reason code rather than a string: one word instead of
+unbounded calldata, and an enumerated set a compliance system can query.
 
-**Freeze is also the precondition for `burnFrom`** (sections 7 and 9). Nothing about the
-freeze itself changes — it still only blocks outbound transfers, and it is still
-reversible — but it is now the first of the two keys a seizure needs, which is why the
-reason code matters more than it would for a block alone. A compliance officer acting alone
-still cannot destroy anything; freezing is what makes a later `ISSUER_ROLE` call possible,
-in public, with a stated cause.
+Freeze is also the precondition for `burnFrom` (sections 7 and 9): the first of the two
+keys a seizure needs. A compliance officer acting alone cannot destroy anything.
 
 ---
 
 ## 6. Pause
 
-**Decision:** `PAUSER_ROLE` halts all transfers, mints and burns — `burnFrom` included.
-OpenZeppelin `Pausable`.
-
-Pause is a **network-incident** control — something is wrong with the contract or the
-chain; freeze is the **per-address** instrument. Views stay readable while paused.
-`approve` is also blocked: granting new spending authority during an incident serves no
-purpose and could stage a drain for the moment the pause lifts.
+`PAUSER_ROLE` halts all transfers, mints and burns, `burnFrom` included. OpenZeppelin
+`Pausable`. Pause is a network-incident control; freeze is the per-address instrument.
+Views stay readable. `approve` is also blocked: granting new spending authority during an
+incident serves no purpose and could stage a drain for the moment the pause lifts.
 
 ---
 
 ## 7. Mint and burn
 
-**Decision:** `ISSUER_ROLE` only. Mint represents money entering the system — a bank
-depositing central bank reserves, or an issuer creating a liability; burn represents
-withdrawal. The mint recipient must be `isApproved`, and no supply path consumes a tier
-limit (section 3).
+`ISSUER_ROLE` only. Mint is money entering the system, a bank depositing reserves or an
+issuer creating a liability; burn is withdrawal. The mint recipient must be `isApproved`,
+and no supply path consumes a tier limit (section 3).
 
-Two burn paths, for two different situations:
+Two burn paths:
 
 - **`burn(value)`** takes from the issuer's own balance. This is the ordinary redemption
-  route: to withdraw from a customer, the customer transfers to the issuer first, then the
-  issuer burns. Every cooperative redemption uses this and only this.
+  route: the customer transfers to the issuer, then the issuer burns.
 - **`burnFrom(account, value, reason)`** takes from a holder that has not consented. It
-  **reverts unless `account` is frozen**, so `COMPLIANCE_OFFICER_ROLE` must have acted
-  first, in a separate transaction from a separate key. It carries a `bytes32` reason code,
-  the same enumerated set a freeze uses (section 5). Section 9 sets out why this exists and
-  what it costs.
+  reverts unless `account` is frozen, so `COMPLIANCE_OFFICER_ROLE` must have acted first,
+  from a separate key. It carries the same `bytes32` reason code a freeze does. Section 9
+  covers why it exists.
 
-The frozen precondition is the whole control. Without it `burnFrom` would be an unaudited
-way for one key to destroy anyone's holdings; with it, the destruction can only follow a
-public, attributed, reversible act by a different role. Sender-side compliance checks do
-not apply to either path (section 3), which is deliberate: a seizure target is typically
-sanctioned, and requiring it to be `isApproved` would disable the function exactly when it
-is needed.
-
-All three paths emit events carrying the acting issuer, so every supply change is
-attributed.
-
-**`ISSUER_ROLE` on all three is the invariant that replaces the `_update` guard.** Because a
-burn skips the sender-side checks (section 3), nothing in `_update` prevents a balance from
-being reduced without its holder's consent — access control is the whole of the protection,
-and there is no public burn entry point for a holder or anyone else. It is worth an explicit
-test: no address without `ISSUER_ROLE` can reduce any balance it does not own.
+The frozen precondition is the whole control: destruction can only follow a public,
+attributed, reversible act by a different role. All three paths emit events carrying the
+acting issuer. Because a burn skips the sender-side checks (section 3), access control is
+the only protection against a balance being reduced without consent, and the test suite
+asserts that no address without `ISSUER_ROLE` can reduce a balance it does not own.
 
 ---
 
 ## 8. Decimals and denomination
 
-Balances are whole numbers. `decimals()` only says where to put the decimal point when one
-is displayed.
+`decimals() == 6`. One euro is 1,000,000 units; the smallest amount the token can hold is
+0.000001 EUR, four digits finer than a cent.
 
-**Decision: `decimals() == 6`.** One euro is 1,000,000 units, so the smallest amount the
-token can hold is 0.000001 EUR — four digits finer than a cent.
+Not 2, because a cent cannot be split. Interest, pro-rata allocations and price × quantity
+rarely divide evenly, so each would round to a whole cent and the leftover would accumulate
+across a day of settlements. Not 18, because that is a habit inherited from ether rather
+than a property of money, and it invites mistakes when an 18-decimal token and this one
+appear in the same settlement. Six is what USDC and EURC use.
 
-**Why not 2**, one unit per cent? Because a cent cannot be split. Interest, pro-rata
-allocations and price × quantity rarely divide evenly, so each one has to round to a whole
-cent and the leftover has to go somewhere. Repeat that across a day of settlements and the
-books stop reconciling. The four spare digits absorb it.
-
-**Why not 18**, the EVM default? That is a habit inherited from ether, not a property of
-money. It buys precision nobody needs, and it invites mistakes when an 18-decimal asset
-token and this token appear in the same settlement.
-
-**6** is also what tokenized fiat already uses: USDC and EURC both do.
-
-**Also: the contract records its own currency** — `"EUR"`, `"USD"` — as an immutable
-`bytes3` holding the ISO 4217 code.
-
-Each deployment is one currency. A euro token and a dollar token are two separate
-contracts, because an ERC-20 has a single balance mapping with no way to keep two
-currencies apart inside it. The currency is therefore fixed when the contract is deployed,
-which is why it can be `immutable`.
-
-This matters when a settlement contract handles more than one cash leg. It can read the
-code and confirm it is paying euros with euros, instead of trusting that whoever configured
-it wired up the right address.
+The contract also records its own currency as an immutable `bytes3` holding the ISO 4217
+code. Each deployment is one currency: an ERC-20 has a single balance mapping and cannot
+keep two currencies apart. The settlement contract reads the code to confirm it is paying
+euros with euros rather than trusting whoever configured the address
+([settlement section 6](design-settlement.md#6-the-trade-names-the-instruments-and-settlement-verifies-them)).
 
 ---
 
@@ -440,121 +294,75 @@ it wired up the right address.
 
 ### Not upgradeable
 
-No proxy. The compliance rules here are deliberate and fixed; if they must change, deploy a
-new token and migrate balances through a controlled migration contract — a visible,
-auditable event rather than a silent change of behaviour under a stable address. Upgrade
-patterns are covered in `upgradeable-kyc-registry`, where they belong: the registry must
-evolve because sanctions regimes and KYC requirements evolve. A unit of currency does not.
+No proxy. If the compliance rules must change, deploy a new token and migrate balances
+through a migration contract: a visible, auditable event rather than a change of behaviour
+under a stable address. The registry is upgradeable because sanctions regimes and KYC
+requirements evolve. A unit of currency does not.
 
 ### No `permit` (EIP-2612), for now
 
-The [scope section](DESIGN.md#scope) notes that an allowance is permission rather than
-escrow, so a stale one is a settlement that fails. The buyer can hold that window down to
-seconds by sending `approve` and `settle` back-to-back, but not to zero: they are calls to
-two different contracts, so they are two transactions. The seller's window is wider still,
-because its allowance has to stand from `propose` until the trade settles or expires
-([settlement section 3](design-settlement.md#3-lifecycle)). That gap is exactly what
-EIP-2612 closes: `permit` turns an approval into a signature, so a settlement contract can
-carry both banks' signed approvals and do approve, approve and settle in one transaction.
-There is then no window at all in which an allowance sits unused — which is the same
-instinct that motivates DvP in the first place.
+An allowance sits open between `approve` and the settlement that uses it: seconds for the
+buyer, and for the seller the whole life of the proposal
+([settlement section 3](design-settlement.md#3-lifecycle)). `permit` turns an approval into
+a signature, so the settlement contract could carry both banks' signed approvals and do
+approve, approve and settle in one transaction. The usual argument for `permit`, gasless
+approval via a relayer, does not apply on a zero-gas network; the atomicity does.
 
-It is deferred rather than rejected. The argument for it is real, and stronger here than the
-usual one: `permit` is normally sold as gasless approval via a relayer, a motivation that
-mostly evaporates on a zero-gas permissioned network whose participants run their own nodes
-and hold their own keys. What survives is the atomicity, and that is worth having.
-
-What it costs is a signature scheme in a contract whose current surface is deliberately
-small: an EIP-712 domain separator, a nonce per holder, deadline handling, and a
-compliance-specific question this document would have to answer — a `permit` presented while
-`approve` is paused (section 6) must be blocked too, or pause acquires a hole shaped exactly
-like the drain it was meant to prevent. That is a section of its own, and it should be
-written when the token is otherwise finished rather than folded in alongside first
-principles.
-
-**If it is added**, it goes in as `ERC20Permit` with `permit` gated by `whenNotPaused`, and
-the spender sanctions check of section 3 stays where it is: `permit` grants authority,
-`transferFrom` exercises it, and the check belongs at the point of exercise.
+It is deferred because it adds a signature scheme (EIP-712 domain, nonces, deadlines) to a
+deliberately small surface, and raises one compliance question: a `permit` presented while
+`approve` is paused (section 6) must be blocked too. If added, it goes in as `ERC20Permit`
+gated by `whenNotPaused`, and the spender sanctions check stays on `transferFrom`, the
+point of exercise.
 
 ### No role can redirect another holder's tokens
 
 There is no `seize(from, to)`. The one function that reaches into a balance without the
-holder's consent is `burnFrom` (section 7), and it can only **destroy**. It names no
-recipient, so the caller ends up holding nothing and total supply falls.
+holder's consent is `burnFrom` (section 7), and it can only destroy. It names no recipient,
+so the caller ends up holding nothing and total supply falls.
 
-Two on-chain preconditions, both enforced by the contract:
+The target must already be frozen, which only `COMPLIANCE_OFFICER_ROLE` can do, and the
+call itself is `ISSUER_ROLE`. Section 2 requires those to be different parties, so a
+seizure is two transactions from two keys, each with its own event. A court-ordered
+reassignment is that burn followed by a mint to the new owner: two supply events rather
+than one transfer, so it appears in supply reconciliation instead of reading as a payment.
 
-- the target must **already be frozen**, which only `COMPLIANCE_OFFICER_ROLE` can do
-- the call itself is **`ISSUER_ROLE`**
+Two alternatives were rejected. No non-consensual path at all does not work: a holder under
+a seizure order is not cooperating, and freezing them removes even the option of a
+voluntary transfer, so the order could not be executed on-chain. A `seize(from, to)` in one
+call is one transaction from one key, indistinguishable in the logs from a transfer.
 
-Section 2 requires those to be different parties, so a seizure is two transactions from two
-keys, each emitting its own event: a freeze with a reason code, then a burn attributed to
-the acting issuer. Neither key completes it alone, and neither can do it quietly.
-
-**A court-ordered reassignment** is that burn followed by a mint to the new owner. Two
-supply events rather than one transfer, on purpose: total supply visibly falls and rises,
-so the movement appears in every supply reconciliation instead of reading as an ordinary
-payment between two accounts.
-
-**Rejected: no non-consensual path at all.** The stricter version of this rule allows burn
-only from the issuer's own balance, and satisfies a court order by having the holder
-transfer to the issuer first. It does not work. A holder under a seizure order is by
-definition not cooperating, and freezing them — the first thing a court order calls for —
-removes even the option. No sequence of calls reaches the balance, so the order cannot be
-executed on-chain at all. Answering a foreseeable legal requirement with "impossible" is
-not conservatism, it is an unfinished design.
-
-**Rejected: `seize(from, to)` in one call.** One transaction, one key, and in the logs it
-is indistinguishable from a transfer. The two-step shape gives up nothing an operator needs
-and keeps the seizure legible.
-
-**What this costs, stated plainly.** A compromised `ISSUER_ROLE` key together with a
-compromised `COMPLIANCE_OFFICER_ROLE` key can extinguish any balance on the network and
-re-mint it elsewhere. That is a real power and this document will not pretend otherwise. It
-is bounded in three ways rather than eliminated: it takes two keys held by two teams, it
-cannot touch an account that has not first been frozen in public, and it moves total supply
-in both directions where an ordinary transfer would not. Holders own a claim that can be
-extinguished only through that sequence — not a permission any single operator can revoke.
+The cost is that a compromised `ISSUER_ROLE` key together with a compromised
+`COMPLIANCE_OFFICER_ROLE` key can extinguish any balance and re-mint it elsewhere. That
+power is bounded rather than eliminated: two keys held by two teams, a public freeze first,
+and a supply change in both directions that an ordinary transfer would not produce.
 
 ---
 
 ## 10. Gas
 
-Against a vanilla ERC-20 baseline the compliance layer adds one packed storage read/write on
-the transfer paths — the daily-usage slot from section 4, which mint and burn never touch and
-a `NO_LIMIT` tier skips entirely — plus the registry calls below:
+Against a vanilla ERC-20 the compliance layer adds one packed storage read/write on the
+transfer paths (the daily-usage slot from section 4, which mint and burn never touch and a
+`NO_LIMIT` tier skips) plus the registry calls below:
 
-| path                | registry calls                                               |
-| ------------------- | ------------------------------------------------------------ |
-| `transfer`          | `isApproved(from)`, `isApproved(to)`, `tierOf(from)` — **3** |
-| `transferFrom`      | the above plus `isSanctioned(spender)` — **4**               |
-| `mint`              | `isApproved(to)` — **1**                                     |
-| `burn` / `burnFrom` | none — the sender side is skipped on a burn (section 3)      |
+| path                | registry calls                                             |
+| ------------------- | ---------------------------------------------------------- |
+| `transfer`          | `isApproved(from)`, `isApproved(to)`, `tierOf(from)`: 3    |
+| `transferFrom`      | the above plus `isSanctioned(spender)`: 4                  |
+| `mint`              | `isApproved(to)`: 1                                        |
+| `burn` / `burnFrom` | none; the sender side is skipped on a burn (section 3)     |
 
-Each is a `STATICCALL` into the registry's UUPS proxy, so each carries a `delegatecall` hop
-to the implementation. Three or four of those on a hot path is the whole of the compliance
-overhead, and it is the first thing to attack if the numbers come back badly.
-
-**They could be collapsed, and that is a decision waiting on measurement — not a
-constraint.** `IKYCRegistryV2` exposes no combined getter today, but the registry is ours:
-`KYCRegistry.recordOf` already returns status, expiry and sanctioned flag in a single call,
-and only `tierOf` lives in separate V2 storage. A
-`complianceOf(address) → (bool approved, bool sanctioned, Tier tier)` would fold three or
-four round trips into one, and the registry being UUPS-upgradeable means adding it is
-additive rather than a redeploy.
-
-It is deliberately not being added yet, for two reasons. Optimising a path nobody has
-measured is how interfaces acquire methods that exist for a caller that turned out not to
-need them. And a getter shaped for one consumer is a coupling between the two repos that
-should be paid for by evidence, not by assumption — section 1 spends real design effort
-keeping this token's dependency on the registry minimal and legible.
+Each is a `STATICCALL` into the registry's UUPS proxy, so each carries a `delegatecall`
+hop. A combined `complianceOf(address) → (approved, sanctioned, tier)` on the registry
+would fold three or four round trips into one and can be added without a redeploy. It has
+not been added yet; a getter shaped for one consumer couples the two repositories, and the
+measurements below say what it would buy.
 
 ### Measured
 
-`test/Gas.t.sol`, against an unmodified OpenZeppelin ERC-20 with the same decimals. Registry
-reads go through a `delegatecall` proxy so the UUPS hop is included. Each path is measured
-twice: **cold** is the first call, the state a real transaction starts from; **warm** is a
-second call in the same transaction. Figures exclude the 21,000 base transaction cost.
+`test/Gas.t.sol`, against an unmodified OpenZeppelin ERC-20 with the same decimals.
+Registry reads go through a `delegatecall` proxy so the UUPS hop is included. Cold is the
+first call, the state a real transaction starts from; warm is a second call in the same
+transaction. Figures exclude the 21,000 base transaction cost.
 
 | path                          |   cold |   warm | vs vanilla (cold) |
 | ----------------------------- | -----: | -----: | ----------------: |
@@ -566,49 +374,35 @@ second call in the same transaction. Figures exclude the 21,000 base transaction
 | `burn`                        |      - |  6,869 |                 - |
 | `canTransfer` (view)          | 44,314 |      - |                 - |
 
-Three things the numbers say:
-
 - **The registry calls dominate, not the accumulator.** `NO_LIMIT` skips the daily slot
-  entirely and still costs +30,524 over vanilla — roughly 10,000 per `STATICCALL` once the
-  cold account access and the proxy's `delegatecall` hop are paid. That is the compliance
-  overhead, and it is where `complianceOf` would act.
-- **The daily accumulator costs +23,979 cold, +2,079 warm.** Almost all of the cold figure is
-  the `0 -> nonzero` `SSTORE` the first time a sender transacts on a new day; every later
-  transfer that day writes an existing slot. Packing `DailyUsage` into one word (section 4) is
-  what keeps this a single write.
-- **`transferFrom` adds 6,640 over `transfer`** — `isSanctioned(spender)` plus the allowance
-  read. Section 3's decision to keep that check off the direct path is worth about that much
-  on every plain payment.
+  and still costs +30,524 over vanilla, roughly 10,000 per `STATICCALL` once the cold
+  account access and the proxy hop are paid. That is where `complianceOf` would act.
+- **The daily accumulator costs +23,979 cold, +2,079 warm.** Almost all of the cold figure
+  is the `0 -> nonzero` `SSTORE` the first time a sender transacts on a new day. Packing
+  `DailyUsage` into one word (section 4) keeps this a single write.
+- **`transferFrom` adds 6,640 over `transfer`**: `isSanctioned(spender)` plus the allowance
+  read. Keeping that check off the direct path (section 3) saves about that much on every
+  plain payment.
 
-**Throughput.** A capped `transfer` is ~94,400 gas as a whole transaction against ~39,900 for
-a vanilla one. At a 30M block limit that is roughly 318 compliant transfers per block against
-752, so the compliance layer costs about **2.4x in throughput** — the number to hold against
-the network's settlement window.
+**Throughput.** A capped `transfer` is ~94,400 gas as a whole transaction against ~39,900
+for a vanilla one. At a 30M block limit that is roughly 318 compliant transfers per block
+against 752, so the compliance layer costs about 2.4x in throughput.
 
-**Checked against the real registry.** `test/Integration.t.sol` runs the same path against
-`KYCRegistryV2` behind a real ERC-1967 proxy, and the figures agree:
+**Checked against the real registry.** `test/TokenizedCashRegistry.t.sol` runs the same
+path against `KYCRegistryV2` behind a real ERC-1967 proxy:
 
 | `transfer`                  |   cold |   warm |
 | --------------------------- | -----: | -----: |
 | mock + `delegatecall` proxy | 73,391 | 14,391 |
 | real registry + UUPS proxy  | 73,126 | 16,126 |
 
-Cold is within 0.4%, so the cold figure is dominated by the three cross-contract calls and
-their account accesses rather than by anything the registry does inside them. Warm is ~1,700
-higher against the real registry, which is the fuller `Record` it reads once the accounts are
-already warm. The mock is a sound stand-in for this measurement.
+Cold is within 0.4%, so the cold figure is dominated by the cross-contract calls rather
+than by anything the registry does inside them. Warm is ~1,700 higher against the real
+registry, the fuller `Record` it reads. The mock is a sound stand-in.
 
-**So `complianceOf` is now justified by evidence**, on the terms section 1 set: it would fold
-three or four round trips into one and take the largest single component of the overhead with
-it. It remains a change to the registry repo, and the before-and-after belongs here when it
-lands.
-
-The benchmark lives in `src/test/Gas.t.sol` and runs with the rest of the suite, so the
-figures above can be regenerated with `forge test --match-path test/Gas.t.sol -vv`.
-
-On a permissioned Besu network gas price is zero or near zero, so this is a **throughput**
-question, not a cost one: gas per transfer determines transactions per block, which
-determines whether the network meets its settlement window.
+On a permissioned Besu network the gas price is zero or near zero, so gas per transfer is a
+throughput figure: it sets transactions per block, which sets whether the network meets its
+settlement window.
 
 ---
 
@@ -617,7 +411,7 @@ determines whether the network meets its settlement window.
 | #   | Decision                                                                                   |
 | --- | ------------------------------------------------------------------------------------------ |
 | 1   | No local KYC state. Registry is the source of truth, address `immutable`                   |
-| 2   | `AccessControl` with four roles, split by tempo; hot keys kept narrow                      |
+| 2   | `AccessControl` with four roles, split by team and tempo; hot keys kept narrow             |
 | 3   | `from` and `to` fully checked; spender checked for sanctions only                          |
 | 4   | Fixed UTC-day window, per tier only, `NO_LIMIT` sentinel, `UNSET` reverts                  |
 | 5   | Freeze blocks outbound, allows inbound, emits a reason code                                |

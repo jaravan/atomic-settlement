@@ -41,10 +41,6 @@ contract AssetToken is ERC20, AccessControl, Pausable {
     /// @notice Whether an address is frozen. A frozen address cannot send, but can receive.
     mapping(address account => bool) public frozen;
 
-    /// @dev Tells _update to skip the sender-side checks for one forced transfer. Transient
-    ///      (EIP-1153): set and cleared within a single call, and a revert unwinds it.
-    bool private transient _forcing;
-
     // ---------------------------------------------------------------------------------
     // Errors
     // ---------------------------------------------------------------------------------
@@ -151,8 +147,7 @@ contract AssetToken is ERC20, AccessControl, Pausable {
 
         // A burn (to == 0) delivers to nobody, so the sender side is not guarded (section 3).
         // Unlike the cash leg, nothing here reads tierOf: there are no limits (section 4).
-        // A forced transfer skips the sender side too: its target is frozen by requirement.
-        if (from != address(0) && to != address(0) && !_forcing) {
+        if (from != address(0) && to != address(0)) {
             if (!registry.isApproved(from)) revert NotApproved(from);
             if (frozen[from]) revert SenderFrozen(from);
 
@@ -161,10 +156,14 @@ contract AssetToken is ERC20, AccessControl, Pausable {
             if (balance < value) revert ERC20InsufficientBalance(from, balance, value);
         }
 
-        // Also covers the mint recipient, and the target of a forced transfer.
-        if (to != address(0)) {
-            if (!registry.isApproved(to)) revert NotApproved(to);
-        }
+        // Also covers the mint recipient.
+        if (to != address(0)) _checkRecipient(to);
+    }
+
+    /// @dev The one rule a forced transfer still applies, kept as one function so the two
+    ///      callers cannot drift.
+    function _checkRecipient(address to) private view {
+        if (!registry.isApproved(to)) revert NotApproved(to);
     }
 
     // ---------------------------------------------------------------------------------
@@ -292,10 +291,12 @@ contract AssetToken is ERC20, AccessControl, Pausable {
         whenNotPaused
     {
         if (!frozen[from]) revert AccountNotFrozen(from);
+        if (to == address(0)) revert ERC20InvalidReceiver(address(0)); // would be a burn
+        _checkRecipient(to);
 
-        _forcing = true;
-        _transfer(from, to, value); // _update still runs isApproved(to)
-        _forcing = false;
+        // super._update is ERC20's own: the balances move, the sender-side checks in this
+        // contract's override are not run. That is the whole bypass (section 8).
+        super._update(from, to, value);
 
         emit ForcedTransfer(from, to, value, reason, msg.sender);
     }

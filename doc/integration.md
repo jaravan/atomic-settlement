@@ -1,8 +1,8 @@
 # Integration notes
 
-What a client has to get right that the contracts cannot enforce. The design documents say
-why; this says what. Section references are to [design-settlement.md](design-settlement.md)
-unless marked otherwise.
+What a client has to get right that the contracts cannot enforce. The design documents
+give the reasons; this document gives the rules. Section references are to
+[design-settlement.md](design-settlement.md) unless marked otherwise.
 
 ---
 
@@ -18,12 +18,12 @@ unless marked otherwise.
 
 ## 2. Before anything can settle
 
-- **Both parties need a tier, not just an approval.** Onboarding is `approve(account, expiry, orgId)`
-  *and* `setTier(account, tier)` on the registry. `isApproved` alone fails the cash leg with
-  `TierUnset` (cash section 4).
-- **Tier limits must be set on `TokenizedCash`.** An unconfigured tier reads as zero and refuses
-  everything. `INSTITUTIONAL` is normally `NO_LIMIT` (cash section 4).
-- **Approvals expire, on both sides.** A lapsed party fails with `NotApproved`.
+- **Both parties need a tier, not only an approval.** Onboarding is
+  `approve(account, expiry, orgId)` and `setTier(account, tier)` on the registry.
+  `isApproved` alone fails the cash leg with `TierUnset` (cash section 4).
+- **Tier limits must be set on `TokenizedCash`.** An unconfigured tier reads as zero and
+  refuses everything. `INSTITUTIONAL` is normally `NO_LIMIT` (cash section 4).
+- **Approvals expire.** A lapsed party on either side fails with `NotApproved`.
 
 ---
 
@@ -41,10 +41,10 @@ SELLER                                        BUYER
                                               7. dvp.settle(tradeId, termsHash)
 ```
 
-- The seller's allowance stands open from step 1 until settle, cancel or expiry. Size it to
-  what is on offer: one holding can back two proposals, and the second to settle reverts
-  (section 3).
-- The buyer's window is steps 6–7, two transactions back to back (section 3).
+- The seller's allowance stands open from step 1 until settle, cancel or expiry. One
+  holding can back two proposals, and the second to settle reverts, so size the allowance
+  to what is on offer (section 3).
+- The buyer's window is steps 6 and 7, two transactions back to back (section 3).
 
 ```solidity
 struct Terms {
@@ -66,8 +66,8 @@ struct Terms {
 
 ## 4. The terms hash
 
-`settle` requires the buyer to state the terms it agreed, as a hash. Compute it **from your
-own trade record** (section 2):
+`settle` requires the buyer to state the terms it agreed, as a hash. Compute it from your
+own trade record (section 2):
 
 ```
 termsHash = keccak256(abi.encode(
@@ -86,11 +86,9 @@ termsHash = keccak256(abi.encode(
 ))
 ```
 
-`hashTerms(tradeId, seller, terms)` on the contract is a reference implementation: use it
-to verify yours during development.
-
-**Never** read the proposal back with `trades(tradeId)` and hash that. It always matches
-and asserts nothing.
+`hashTerms(tradeId, seller, terms)` on the contract is a reference implementation for
+verifying yours during development. Do not read the proposal back with `trades(tradeId)`
+and hash that in production: it always matches and asserts nothing.
 
 ---
 
@@ -100,8 +98,9 @@ and asserts nothing.
 function canSettle(uint256 tradeId, bytes32 termsHash) external view returns (bool ok, bytes4 reason);
 ```
 
-`reason` is the selector of the error `settle` would revert with. Checks run in this order
-and stop at the first failure (section 5):
+`reason` is the selector of the error `settle` would revert with. Checks run in this
+order and stop at the first failure (section 5). Selectors are `bytes4(keccak256(signature))`
+and can be regenerated with `cast sig`.
 
 | Order | Source | Selector | Error | Meaning |
 | --- | --- | --- | --- | --- |
@@ -121,10 +120,12 @@ and stop at the first failure (section 5):
 | 6 | cash leg | `0xd93c0665` | `EnforcedPause()` | cash token paused |
 | 7 | asset leg | as above, minus tier and limit errors | | seller side |
 
-**Shared selectors.** `SenderFrozen`, `NotApproved`, `SpenderSanctioned`, `EnforcedPause` and
-the ERC-20 errors have the same signature on both tokens, so the same selector. `0x23f7b28c`
-means *someone* is frozen; the cash leg is asked first, so if the buyer passes it is the
-seller. To pin it down:
+**Shared selectors.** `SenderFrozen`, `NotApproved`, `SpenderSanctioned`, `EnforcedPause`
+and the ERC-20 errors have the same signature on both tokens, so the same selector, and
+`canSettle` does not say which leg raised it. The cash leg is checked first: `SenderFrozen`
+from it means the buyer, from the asset leg the seller; `NotApproved` from the cash leg
+can be either party, since it checks both. To attribute an error to a party, ask the legs
+directly:
 
 ```solidity
 cash.canTransferFrom(dvp, buyer, seller, cashAmount)
@@ -145,8 +146,8 @@ asset.canTransferFrom(dvp, seller, buyer, assetAmount)
 
 `tradeId`, `seller` and `buyer` are indexed on all three.
 
-**Nothing is emitted on expiry or on a failed settle** (section 8). Compute expiry from
-`TradeProposed.deadline`; treat a reverted `settle` as a fail. `trades(id).status` stays
+Nothing is emitted on expiry or on a failed settle (section 8). Compute expiry from
+`TradeProposed.deadline` and treat a reverted `settle` as a fail. `trades(id).status` stays
 `PROPOSED` after expiry.
 
 ---
@@ -158,7 +159,7 @@ asset.canTransferFrom(dvp, seller, buyer, assetAmount)
 | `TokenizedCash` | 6 | `10_000_000_000_000` |
 | `AssetToken` | 0 | `100` |
 
-`currency` is a left-aligned `bytes3` (`"EUR"` = `0x455552`); `isin` a left-aligned
+`currency` is a left-aligned `bytes3` (`"EUR"` is `0x455552`) and `isin` a left-aligned
 `bytes12`. Pass them as bytes, not numbers.
 
 ---

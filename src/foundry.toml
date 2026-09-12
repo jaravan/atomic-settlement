@@ -8,9 +8,10 @@ libs = ["lib"]
 # compiler under a pinned dependency defeats the point of pinning the dependency.
 solc = "0.8.30"
 
-# Cancun gives us transient storage (EIP-1153) for the asset leg's _forcing flag.
-# Besu supports it from 24.x.
-evm_version = "cancun"
+# London: the oldest target the code needs (CHAINID is Istanbul, nothing later is used),
+# and the newest fork the besu-sandbox chart's genesis can enable. Raising it would emit
+# PUSH0 (Shanghai) and refuse to run on that chart for a gas saving nobody would notice.
+evm_version = "london"
 
 # Invariants: a fast default for every `forge test`, a deep profile for when it matters.
 # `FOUNDRY_PROFILE=deep forge test --match-contract SystemInvariants` runs 128,000 calls

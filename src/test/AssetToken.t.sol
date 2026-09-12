@@ -772,6 +772,18 @@ contract AssetTokenTest is Test {
         assertEq(bond.balanceOf(NEW_OWNER), ISSUE_SIZE);
     }
 
+    /// @dev super._update would treat a zero recipient as a burn, and a burn is exactly what
+    ///      section 8 exists to prevent. The guard _transfer would have supplied is explicit.
+    function test_forceTransfer_refusesZeroRecipient() public {
+        (address issuer,) = _seizureReady();
+
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InvalidReceiver.selector, address(0)));
+        vm.prank(issuer);
+        bond.forceTransfer(ALICE, address(0), ISSUE_SIZE, REASON);
+
+        assertEq(bond.totalSupply(), ISSUE_SIZE, "nothing burned");
+    }
+
     /// @dev The bypass is sender-side only: isApproved(to) still runs.
     function test_forceTransfer_recipientMustStillBeApproved() public {
         (address issuer,) = _seizureReady();
@@ -829,11 +841,11 @@ contract AssetTokenTest is Test {
         bond.forceTransfer(ALICE, NEW_OWNER, ISSUE_SIZE, REASON);
     }
 
-    // -- the _forcing flag never leaks (section 8) ----------------------------------------
+    // -- the bypass is for that one call only (section 8) ----------------------------------
 
     /// @dev After a successful forced transfer, an ordinary transfer from a frozen sender
-    ///      must still be refused: the bypass was for that one call only.
-    function test_forcing_clearsAfterSuccess() public {
+    ///      must still be refused: nothing about the bypass persists.
+    function test_forceTransfer_leavesOrdinaryChecksIntactAfterSuccess() public {
         (address issuer,) = _seizureReady();
 
         vm.prank(issuer);
@@ -844,9 +856,9 @@ contract AssetTokenTest is Test {
         bond.transfer(NEW_OWNER, 1);
     }
 
-    /// @dev A forced transfer that reverts inside _update must not leave the flag set. The
-    ///      recipient check is the revert that fires after the flag is raised.
-    function test_forcing_clearsAfterRevert() public {
+    /// @dev A forced transfer that reverts on the recipient check must leave nothing behind
+    ///      that loosens an ordinary transfer afterwards.
+    function test_forceTransfer_leavesOrdinaryChecksIntactAfterRevert() public {
         (address issuer,) = _seizureReady();
         registry.setApproved(NEW_OWNER, false);
 
@@ -854,7 +866,7 @@ contract AssetTokenTest is Test {
         vm.prank(issuer);
         bond.forceTransfer(ALICE, NEW_OWNER, ISSUE_SIZE, REASON);
 
-        // Same transaction context: if the flag leaked, this frozen sender could transfer.
+        // Same transaction context: if anything leaked, this frozen sender could transfer.
         _approve(BOB);
         vm.expectRevert(abi.encodeWithSelector(AssetToken.SenderFrozen.selector, ALICE));
         vm.prank(ALICE);
@@ -1063,7 +1075,7 @@ contract AssetTokenTest is Test {
         assertFalse(ok);
         assertEq(reason, AssetToken.SenderFrozen.selector);
 
-        // and yet the forced path goes through, because it sets _forcing and a preview cannot
+        // and yet the forced path goes through, because it never runs the override a preview does
         vm.prank(issuer);
         bond.forceTransfer(ALICE, NEW_OWNER, ISSUE_SIZE, REASON);
         assertEq(bond.balanceOf(NEW_OWNER), ISSUE_SIZE);
