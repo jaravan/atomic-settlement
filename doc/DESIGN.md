@@ -28,6 +28,9 @@ Design notes per contract:
 - [Asset Token](design-asset.md) — the asset leg
 - [Settlement](design-settlement.md) — the contract that moves both legs
 
+For building a client against them: [Integration notes](integration.md) — what a caller
+has to get right that the contracts cannot enforce.
+
 ### The problem
 
 - **Every trade is two transfers in opposite directions.** Bank A buys a bond from Bank B.
