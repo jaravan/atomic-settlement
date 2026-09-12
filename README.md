@@ -104,11 +104,136 @@ preferences:
 - [Tokenized Cash](doc/design-cash.md) — the cash leg, in full
 - [Asset Token](doc/design-asset.md) — the asset leg, in full
 - [Settlement](doc/design-settlement.md) — the settlement contract, in full
+- [Integration notes](doc/integration.md) — what a client has to get right that the
+  contracts cannot enforce
 
 ## Status
 
-Design first: the reasoning is written down before the Solidity is. Contracts land in
-`src/` behind the documents above.
+All three contracts are built, each one design section at a time, with its tests landing
+in the same commit. Every branch is covered, every `Gas` section is measured, and each
+contract has an integration suite against the real registry.
+
+| Contract        | Lines | Tests | Branch coverage |
+| --------------- | ----: | ----: | --------------: |
+| `TokenizedCash` |   396 |   107 |            100% |
+| `AssetToken`    |   303 |    92 |            100% |
+| `DvPSettlement` |   343 |    80 |            100% |
+
+Not yet done: fuzz and invariant tests across the whole system.
+
+## Build and test
+
+Requires [Foundry](https://book.getfoundry.sh/getting-started/installation). The Foundry
+project root is `src/`; every command below runs from there.
+
+```sh
+git clone --recurse-submodules https://github.com/jaravan/atomic-settlement
+cd atomic-settlement/src
+
+forge build
+forge test                                   # 319 tests
+forge test --match-path test/Gas.t.sol -vv   # the measurements behind each Gas section
+forge coverage --no-match-coverage "test|script"
+```
+
+The compiler and EVM version are pinned in [`foundry.toml`](src/foundry.toml): solc 0.8.30,
+**Cancun**. `AssetToken` uses transient storage, so the target chain must be Cancun too.
+
+## Run it locally
+
+A dev chain, the whole system, and one settlement — five minutes.
+
+**1. A Cancun chain.** Anvil ships with Foundry:
+
+```sh
+anvil --hardfork cancun
+```
+
+**2. Stand everything up.** [`DeployLocal.s.sol`](src/script/DeployLocal.s.sol) deploys the
+registry behind a proxy, both legs, the settlement contract, onboards two banks and funds
+them. Every key is an Anvil default. Never point it at a network that holds value.
+
+```sh
+export RPC=http://localhost:8545
+export DEPLOYER=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80   # anvil account 0
+
+forge script script/DeployLocal.s.sol:DeployLocal --rpc-url $RPC --private-key $DEPLOYER --broadcast
+```
+
+It prints the four addresses. Export them:
+
+```sh
+export CASH=0x…   BOND=0x…   DVP=0x…
+export BANK_A=0x70997970C51812dc3A010C7d01b50e0d17dc79C8   A_KEY=0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d
+export BANK_B=0x3C44CdDdB6a900fa2b585dd299e03d12FA4293BC   B_KEY=0x5de4111afa1a4b94908f83103eb1f1706367c2e68ca870fc3fb9a804cdab365a
+```
+
+**3. Bank B sells 100 bonds to Bank A for EUR 10m.** The seller approves and proposes:
+
+```sh
+DEADLINE=$(( $(cast block latest -f timestamp --rpc-url $RPC) + 86400 ))
+
+cast send $BOND "approve(address,uint256)" $DVP 100 --rpc-url $RPC --private-key $B_KEY
+cast send $DVP "propose((address,address,bytes3,uint256,address,bytes12,uint256,uint64))" \
+  "($BANK_A,$CASH,0x455552,10000000000000,$BOND,0x444530303041314557575730,100,$DEADLINE)" \
+  --rpc-url $RPC --private-key $B_KEY
+# tradeId is topic[1] of the TradeProposed log; the first proposal is 1
+```
+
+**4. Bank A computes the terms hash from its own record** — not by reading the proposal
+back ([integration notes §4](doc/integration.md#4-the-terms-hash)):
+
+```sh
+HASH=$(cast keccak $(cast abi-encode \
+  "f(uint256,address,uint256,address,address,address,bytes3,uint256,address,bytes12,uint256,uint64)" \
+  $(cast chain-id --rpc-url $RPC) $DVP 1 $BANK_B $BANK_A \
+  $CASH 0x455552 10000000000000 $BOND 0x444530303041314557575730 100 $DEADLINE))
+```
+
+**5. Preview, approve, settle:**
+
+```sh
+cast call $DVP "canSettle(uint256,bytes32)(bool,bytes4)" 1 $HASH --rpc-url $RPC
+# false, 0xfb8f41b2 — ERC20InsufficientAllowance: Bank A has not approved the cash yet
+
+cast send $CASH "approve(address,uint256)" $DVP 10000000000000 --rpc-url $RPC --private-key $A_KEY
+cast send $DVP "settle(uint256,bytes32)" 1 $HASH --rpc-url $RPC --private-key $A_KEY
+
+cast call $BOND "balanceOf(address)(uint256)" $BANK_A --rpc-url $RPC   # 100
+cast call $CASH "balanceOf(address)(uint256)" $BANK_B --rpc-url $RPC   # 10000000000000
+```
+
+Both legs moved in one transaction. Try it again with a different `HASH` and watch
+`settle` revert with `TermsMismatch` before anything moves.
+
+## Run it on Besu
+
+[`besu-helmcharts`](https://github.com/jaravan/besu-helmcharts) stands up a four-validator
+QBFT network on Kubernetes with free gas and a unified RPC endpoint:
+
+```sh
+helm upgrade --install sbx oci://ghcr.io/jaravan/besu-helmcharts/besu-sandbox \
+  -n besu --create-namespace --wait --timeout=600s
+kubectl -n besu port-forward svc/sbx-rpc-unified 8545:8545
+```
+
+Then the steps above with `RPC=http://localhost:8545` and the chart's pre-funded dev keys
+in place of Anvil's.
+
+**One requirement the chart does not meet today.** Its genesis is pre-London with a London
+toggle; these contracts need **Cancun**. Deploying `AssetToken` to it fails with an invalid
+opcode. The genesis needs `londonBlock: 0`, `shanghaiTime: 0` and `cancunTime: 0` — a
+change to the chart, tracked there, not something this repository can work around.
+
+For a real deployment use the three per-contract scripts, not `DeployLocal`:
+
+| Script | Reads from the environment | Refuses |
+| --- | --- | --- |
+| [`DeployCash.s.sol`](src/script/DeployCash.s.sol) | token name, symbol, currency; registry; four role holders | issuer = compliance officer; a registry with no code |
+| [`DeployAsset.s.sol`](src/script/DeployAsset.s.sol) | as above, with an ISIN | the same, plus a bad ISIN check digit |
+| [`DeploySettlement.s.sol`](src/script/DeploySettlement.s.sol) | nothing — it has no configuration and no roles | — |
+
+Each is `forge script script/<name>:<Contract> --rpc-url … --private-key … --broadcast`.
 
 ## License
 
