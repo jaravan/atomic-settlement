@@ -20,8 +20,13 @@ jobs:
         with:
           submodules: recursive
 
+      # Pinned to the version the repository is developed and formatted against. The
+      # action defaults to nightly, which can fail `forge fmt --check` on formatting
+      # differences alone.
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.2.2
 
       - name: Show Forge version
         run: |

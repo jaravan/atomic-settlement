@@ -107,20 +107,6 @@ preferences:
 - [Integration notes](doc/integration.md) — what a client has to get right that the
   contracts cannot enforce
 
-## Status
-
-All three contracts are built, each one design section at a time, with its tests landing
-in the same commit. Every branch is covered, every `Gas` section is measured, and each
-contract has an integration suite against the real registry.
-
-| Contract        | Lines | Tests | Branch coverage |
-| --------------- | ----: | ----: | --------------: |
-| `TokenizedCash` |   396 |   107 |            100% |
-| `AssetToken`    |   303 |    92 |            100% |
-| `DvPSettlement` |   343 |    80 |            100% |
-
-Not yet done: fuzz and invariant tests across the whole system.
-
 ## Build and test
 
 Requires [Foundry](https://book.getfoundry.sh/getting-started/installation). The Foundry
@@ -131,9 +117,11 @@ git clone --recurse-submodules https://github.com/jaravan/atomic-settlement
 cd atomic-settlement/src
 
 forge build
-forge test                                   # 319 tests
+forge test                                   # 337 tests, about a second
 forge test --match-path test/Gas.t.sol -vv   # the measurements behind each Gas section
 forge coverage --no-match-coverage "test|script"
+
+FOUNDRY_PROFILE=deep forge test --match-contract SystemInvariants   # 128,000 calls per invariant, ~45s
 ```
 
 The compiler and EVM version are pinned in [`foundry.toml`](src/foundry.toml): solc 0.8.30,

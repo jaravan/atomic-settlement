@@ -12,7 +12,18 @@ solc = "0.8.30"
 # Besu supports it from 24.x.
 evm_version = "cancun"
 
+# Invariants: a fast default for every `forge test`, a deep profile for when it matters.
+# `FOUNDRY_PROFILE=deep forge test --match-contract SystemInvariants` runs 128,000 calls
+# per invariant, which is where the numbers in test/Invariants.t.sol were checked.
+[invariant]
+runs = 32
+depth = 128
+
 [profile.ci]
 verbosity = 3
+
+[profile.deep.invariant]
+runs = 256
+depth = 500
 
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options
