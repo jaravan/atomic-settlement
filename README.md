@@ -117,7 +117,9 @@ slither .                                    # static analysis; config and triag
 
 CI runs `forge fmt --check`, `forge build`, `forge test` and Slither on every push. The
 Slither config excludes four detectors that fire on intended behaviour; the reasons are in
-[`.github/workflows/test.yml`](.github/workflows/test.yml).
+[`.github/workflows/test.yml`](.github/workflows/test.yml). A second job then installs
+`besu-sandbox` on a kind cluster, deploys with `DeployLocal` and settles one trade on Besu
+(see [Run it on Besu](#run-it-on-besu)).
 
 Compiler and EVM version are pinned in [`foundry.toml`](src/foundry.toml): solc 0.8.30,
 EVM version London. Nothing here needs a later fork, and London is the newest fork the Besu
@@ -195,13 +197,30 @@ QBFT network on Kubernetes with free gas and a single RPC endpoint:
 
 ```sh
 helm upgrade --install sbx oci://ghcr.io/jaravan/besu-helmcharts/besu-sandbox \
-  -n besu --create-namespace --wait --timeout=600s
+  -n besu --create-namespace --wait --timeout=600s --set genesis.london=true
+kubectl -n besu wait --for=condition=Ready pod -l app.kubernetes.io/component=validator --timeout=600s
 kubectl -n besu port-forward svc/sbx-rpc-unified 8545:8545
 ```
 
-Then follow the same steps with `RPC=http://localhost:8545` and the chart's pre-funded dev
-keys instead of Anvil's. The chart's genesis is pre-London by default; set
-`genesis.london: true` in its values.
+Two things differ from Anvil. The chart's genesis is pre-London by default, and the
+contracts need London, so install with `--set genesis.london=true`. And the two banks are
+Anvil accounts that hold no ether on this chain; Besu leaves a transaction from an empty
+account in the pool even though gas is free, so send each bank a little ether from one of
+the chart's pre-funded dev accounts before step 3.
+
+[`settle-on-besu.sh`](src/script/settle-on-besu.sh) does all of the above in one go,
+against either chain:
+
+```sh
+export RPC=http://localhost:8545
+export DEPLOYER=0xfc96a9e5a0733664dd4f8c48f163e0f3c71805234bd97637a586ca0bcb0169f7   # a chart dev key
+
+src/script/settle-on-besu.sh
+```
+
+It's what CI runs: the `Settle a trade on Besu` job in
+[`test.yml`](.github/workflows/test.yml) stands up the chart on kind and runs this script
+on every push.
 
 For a real deployment use the three per-contract scripts instead of `DeployLocal`:
 

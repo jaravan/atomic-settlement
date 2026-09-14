@@ -63,3 +63,77 @@ jobs:
         run: |
           slither .
         id: slither
+
+  # The same contracts on a real Besu network: install besu-sandbox from the sibling repo
+  # on a kind cluster, deploy with DeployLocal, settle one trade. Chart version pinned like
+  # every other dependency here; genesis.london is the fork the contracts are built for.
+  besu:
+    name: Settle a trade on Besu
+    runs-on: ubuntu-latest
+    needs: check
+    defaults:
+      run:
+        working-directory: src
+    env:
+      RPC: http://localhost:8545
+      # The chart's first pre-funded dev account. Bank A and Bank B are Anvil accounts,
+      # as DeployLocal hardcodes them; the script sends them ether from this one.
+      DEPLOYER: "0xfc96a9e5a0733664dd4f8c48f163e0f3c71805234bd97637a586ca0bcb0169f7"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.2.2
+
+      - uses: azure/setup-helm@v4
+
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: besu
+
+      - name: Install besu-sandbox
+        run: |
+          helm upgrade --install sbx oci://ghcr.io/jaravan/besu-helmcharts/besu-sandbox \
+            --version 0.3.3 \
+            -n besu --create-namespace --wait --timeout 10m \
+            --set genesis.london=true \
+            --set node.resources.requests.memory=512Mi \
+            --set node.resources.limits.memory=1024Mi
+
+      # Same wait as the chart's own CI: helm --wait skips the validators because their
+      # StatefulSets use updateStrategy OnDelete.
+      - name: Wait for validators
+        run: |
+          for i in $(seq 1 60); do
+            n="$(kubectl -n besu get pods \
+              -l app.kubernetes.io/instance=sbx,app.kubernetes.io/component=validator \
+              --no-headers 2>/dev/null | wc -l)"
+            [ "$n" -ge 4 ] && break
+            sleep 2
+          done
+          kubectl -n besu wait --for=condition=Ready pod \
+            -l app.kubernetes.io/instance=sbx,app.kubernetes.io/component=validator \
+            --timeout=600s
+
+      # Port-forward pins every call to one validator, so nonces and pending state are
+      # read from the node the transactions went to. Same step as the script so the
+      # background process is still there when the script runs.
+      - name: Deploy and settle one trade
+        run: |
+          kubectl -n besu port-forward svc/sbx-rpc-unified 8545:8545 > /dev/null 2>&1 &
+          for i in $(seq 1 60); do
+            b="$(cast block-number --rpc-url "$RPC" 2>/dev/null || echo 0)"
+            [ "$b" -gt 0 ] && break
+            sleep 2
+          done
+          ./script/settle-on-besu.sh
+
+      - name: Validator state on failure
+        if: failure()
+        run: |
+          kubectl -n besu get pods -o wide
+          kubectl -n besu logs sbx-validator1-0 --tail=100
