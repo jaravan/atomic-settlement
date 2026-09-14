@@ -402,26 +402,26 @@ and one fewer storage read/write.
 
 | `transfer`                        |   cold |   warm | registry calls |
 | --------------------------------- | -----: | -----: | -------------: |
-| vanilla ERC-20                    | 18,888 |  4,788 |              0 |
-| **asset**                         | 41,118 | 10,018 |              2 |
-| cash, `NO_LIMIT` tier             | 49,412 | 12,312 |              3 |
-| cash, capped tier                 | 73,391 | 14,391 |              3 |
+| vanilla ERC-20                    | 18,933 |  4,833 |              0 |
+| **asset**                         | 41,112 | 10,012 |              2 |
+| cash, `NO_LIMIT` tier             | 49,586 | 12,486 |              3 |
+| cash, capped tier                 | 73,589 | 14,589 |              3 |
 
 | other asset paths     |   cold |   warm |
 | --------------------- | -----: | -----: |
-| `transferFrom`        | 47,736 | 12,633 |
-| `mint`                | 36,376 |  9,273 |
-| `burn`                |      - |  6,749 |
+| `transferFrom`        | 47,774 | 12,671 |
+| `mint`                | 36,467 |  9,364 |
+| `burn`                |      - |  6,771 |
 | `forceTransfer`       | 33,491 |      - |
 
-- **Dropping `tierOf` is worth 8,294 cold.** Asset `transfer` against cash `NO_LIMIT` is
+- **Dropping `tierOf` is worth 8,474 cold.** Asset `transfer` against cash `NO_LIMIT` is
   the cleanest comparison: identical paths except for that one call, and the gap is one
   registry round trip through the proxy.
-- **A forced transfer is cheaper than an ordinary one** (33,491 against 41,118). It skips
+- **A forced transfer is cheaper than an ordinary one** (33,491 against 41,112). It skips
   `isApproved(from)` and the freeze read, since this contract's `_update` override isn't
   on its call path (section 8); the recipient check is the only registry call left.
 
-Against the real registry (`test/AssetTokenRegistry.t.sol`): 40,425 cold, 11,325 warm,
+Against the real registry (`test/AssetTokenRegistry.t.sol`): 40,434 cold, 11,334 warm,
 within 2% of the mock, same as on the cash leg.
 
 A settlement pays for both legs plus the settlement contract's own overhead. That total,

@@ -368,38 +368,38 @@ same transaction. Figures exclude the 21,000 base transaction cost.
 
 | path                          |   cold |   warm | vs vanilla (cold) |
 | ----------------------------- | -----: | -----: | ----------------: |
-| vanilla `transfer`            | 18,888 |  4,788 |          baseline |
-| `transfer`, `NO_LIMIT` tier   | 49,412 | 12,312 |          +30,524 |
-| `transfer`, capped tier       | 73,391 | 14,391 |          +54,503 |
-| `transferFrom`, capped tier   | 80,031 | 17,028 |          +61,143 |
-| `mint`                        | 36,407 |  9,304 |                 - |
-| `burn`                        |      - |  6,869 |                 - |
-| `canTransfer` (view)          | 44,314 |      - |                 - |
+| vanilla `transfer`            | 18,933 |  4,833 |          baseline |
+| `transfer`, `NO_LIMIT` tier   | 49,586 | 12,486 |          +30,653 |
+| `transfer`, capped tier       | 73,589 | 14,589 |          +54,656 |
+| `transferFrom`, capped tier   | 80,273 | 17,270 |          +61,340 |
+| `mint`                        | 36,493 |  9,390 |                 - |
+| `burn`                        |      - |  6,915 |                 - |
+| `canTransfer` (view)          | 44,511 |      - |                 - |
 
 - **The registry calls dominate, not the accumulator.** `NO_LIMIT` skips the daily slot
-  and still costs +30,524 over vanilla, roughly 10,000 per `STATICCALL` once the cold
+  and still costs +30,653 over vanilla, roughly 10,000 per `STATICCALL` once the cold
   account access and the proxy hop are paid. That's where `complianceOf` would help.
-- **The daily accumulator costs +23,979 cold, +2,079 warm.** Almost all of the cold figure
+- **The daily accumulator costs +24,003 cold, +2,103 warm.** Almost all of the cold figure
   is the `0 -> nonzero` `SSTORE` the first time a sender transacts on a new day. Packing
   `DailyUsage` into one word (section 4) keeps it to a single write.
-- **`transferFrom` adds 6,640 over `transfer`**: `isSanctioned(spender)` plus the allowance
+- **`transferFrom` adds 6,684 over `transfer`**: `isSanctioned(spender)` plus the allowance
   read. Keeping that check off the direct path (section 3) saves about that much on every
   plain payment.
 
-**Throughput.** A capped `transfer` is ~94,400 gas as a whole transaction against ~39,900
-for a vanilla one. At a 30M block limit that's roughly 318 compliant transfers per block
-against 752, so the compliance layer costs about 2.4x in throughput.
+**Throughput.** A capped `transfer` is ~94,600 gas as a whole transaction against ~39,900
+for a vanilla one. At a 30M block limit that's roughly 317 compliant transfers per block
+against 751, so the compliance layer costs about 2.4x in throughput.
 
 **Checked against the real registry.** `test/TokenizedCashRegistry.t.sol` runs the same
 path against `KYCRegistryV2` behind a real ERC-1967 proxy:
 
 | `transfer`                  |   cold |   warm |
 | --------------------------- | -----: | -----: |
-| mock + `delegatecall` proxy | 73,391 | 14,391 |
-| real registry + UUPS proxy  | 73,126 | 16,126 |
+| mock + `delegatecall` proxy | 73,589 | 14,589 |
+| real registry + UUPS proxy  | 73,347 | 16,346 |
 
 Cold is within 0.4%, so the cold figure is dominated by the cross-contract calls rather
-than anything the registry does inside them. Warm is ~1,700 higher against the real
+than anything the registry does inside them. Warm is ~1,750 higher against the real
 registry because of the fuller `Record` it reads. The mock is a fair stand-in.
 
 On a permissioned Besu network the gas price is zero or near zero, so gas per transfer is a

@@ -379,28 +379,28 @@ so the trade record is cold when `settle` reads it. Base transaction cost exclud
 
 | path                 |    cold |    warm |
 | -------------------- | ------: | ------: |
-| `propose`            | 155,703 | 146,384 |
-| `settle`             | 112,865 |  55,665 |
-| `cancel`             |       - |   4,217 |
-| `canSettle` (view)   |  79,826 |       - |
+| `propose`            | 155,846 | 146,527 |
+| `settle`             | 113,214 |  56,014 |
+| `cancel`             |       - |   4,238 |
+| `canSettle` (view)   |  80,220 |       - |
 
 - **A settlement costs less than the sum of its two legs.** The cash and asset
-  `transferFrom` measured alone come to 47,736 + 49,412 = 97,148 cold, and `settle` adds a
-  status write, two immutable reads and its own dispatch, yet lands at 112,865 rather than
+  `transferFrom` measured alone come to 47,774 + 49,586 = 97,360 cold, and `settle` adds a
+  status write, two immutable reads and its own dispatch, yet lands at 113,214 rather than
   ~115,000. The second leg finds the registry proxy and both party accounts already warm
   from the first.
 - **`propose` is the expensive call, and it's all storage.** Six slots written
-  `0 -> nonzero` at ~22,100 each is ~133,000 of the 155,703. The `Trade` struct is ordered
+  `0 -> nonzero` at ~22,100 each is ~133,000 of the 155,846. The `Trade` struct is ordered
   so the small fields pack next to `seller` and `buyer`; the first draft used seven slots
   and cost 177,555. Six is the minimum for four addresses and two full words.
-- **Against the real registry** (`test/DvPSettlementRegistry.t.sol`), `settle` is 130,097
+- **Against the real registry** (`test/DvPSettlementRegistry.t.sol`), `settle` is 130,508
   cold, 15% above the mock. On a single transfer the two matched within 2% because the
   cold account access dominated, but the real registry costs ~1,700 more per call once
   warm (a fuller `Record`, ERC-7201 slot hashing, the proxy's implementation `SLOAD`), and
   a settlement makes seven calls, six of them warm. Plan against the production figure.
-- **Throughput.** ~151,000 gas per settlement as a whole transaction against the real
+- **Throughput.** ~151,500 gas per settlement as a whole transaction against the real
   registry. At a 30M block limit that's roughly 198 settlements per block.
-- **The seven round trips are 35,908 of the 130,097**, measured in isolation
+- **The seven round trips are 36,190 of the 130,508**, measured in isolation
   (`test/RegistryRoundTrips.t.sol`): one cold call and six warm, 28% of a settlement. A
   combined `complianceOf` call on the registry would fold seven into two and save maybe
   25,000, so about 20% of a settlement at best. Worth doing if 198 per block isn't enough,
