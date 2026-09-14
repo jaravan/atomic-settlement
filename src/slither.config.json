@@ -1,0 +1,7 @@
+{
+  "filter_paths": "lib/|test/|script/",
+  "exclude_informational": true,
+  "exclude_optimization": true,
+  "detectors_to_exclude": "arbitrary-send-erc20,incorrect-equality,reentrancy-events,timestamp",
+  "fail_on": "medium"
+}

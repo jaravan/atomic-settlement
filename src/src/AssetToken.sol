@@ -55,8 +55,8 @@ contract AssetToken is ERC20, AccessControl, Pausable {
     error SenderFrozen(address account);
 
     /// @notice `forceTransfer` was called on an account that has not been frozen first.
-    /// @dev The frozen precondition is the whole control: a move without consent can only
-    ///      follow a public, attributed, reversible act by a different role (section 8).
+    /// @dev The frozen precondition is the control: a move without consent can only follow
+    ///      a public, attributed, reversible freeze by a different role (section 8).
     error AccountNotFrozen(address account);
 
     /// @notice The party directing the transfer is sanctioned.
@@ -109,7 +109,7 @@ contract AssetToken is ERC20, AccessControl, Pausable {
     }
 
     /// @inheritdoc ERC20
-    /// @dev A bond is not divisible: a balance of 100 is one hundred bonds (section 9).
+    /// @dev Bonds aren't divisible; a balance of 100 is one hundred bonds (section 9).
     function decimals() public pure override returns (uint8) {
         return 0;
     }
@@ -160,8 +160,8 @@ contract AssetToken is ERC20, AccessControl, Pausable {
         if (to != address(0)) _checkRecipient(to);
     }
 
-    /// @dev The one rule a forced transfer still applies, kept as one function so the two
-    ///      callers cannot drift.
+    /// @dev The one rule a forced transfer still applies. One function so the two callers
+    ///      can't drift apart.
     function _checkRecipient(address to) private view {
         if (!registry.isApproved(to)) revert NotApproved(to);
     }
@@ -199,8 +199,8 @@ contract AssetToken is ERC20, AccessControl, Pausable {
     }
 
     /// @notice Reverts with the error a real `transfer` would.
-    /// @dev Machinery for `canTransfer`. Running the predicate rather than reimplementing it
-    ///      is what makes `reason` correct by construction rather than by convention.
+    /// @dev Backs `canTransfer`. It runs the real predicate rather than a copy of it, so
+    ///      `reason` can't drift from what the transfer would actually revert with.
     function previewTransfer(address from, address to, uint256 value) external view {
         _checkTransfer(from, to, value);
     }
@@ -284,7 +284,7 @@ contract AssetToken is ERC20, AccessControl, Pausable {
     /// @notice Move bonds from a holder that has not consented. Reverts unless the holder
     ///         is already frozen. Total supply is unchanged.
     /// @dev Not burn-and-mint: a bond issue is a fixed legal quantity, and a supply that dips
-    ///      and recovers is a reconciliation break, not a signal (section 8).
+    ///      and recovers breaks reconciliation (section 8).
     function forceTransfer(address from, address to, uint256 value, bytes32 reason)
         external
         onlyRole(ISSUER_ROLE)
@@ -294,8 +294,8 @@ contract AssetToken is ERC20, AccessControl, Pausable {
         if (to == address(0)) revert ERC20InvalidReceiver(address(0)); // would be a burn
         _checkRecipient(to);
 
-        // super._update is ERC20's own: the balances move, the sender-side checks in this
-        // contract's override are not run. That is the whole bypass (section 8).
+        // super._update resolves to ERC20._update, so the sender-side checks in this
+        // contract's override don't run. That's the bypass (section 8).
         super._update(from, to, value);
 
         emit ForcedTransfer(from, to, value, reason, msg.sender);

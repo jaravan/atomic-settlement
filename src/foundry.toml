@@ -3,19 +3,19 @@ src = "src"
 out = "out"
 libs = ["lib"]
 
-# Pinned rather than floating: both token designs reason about OpenZeppelin v5.6.1
-# semantics -- _update is the only virtual hook on the transfer path -- and a moving
-# compiler under a pinned dependency defeats the point of pinning the dependency.
+# Pinned, not floating. Both token designs depend on OpenZeppelin v5.6.1 semantics
+# (_update is the only virtual hook on the transfer path), and there's not much point
+# pinning the dependency if the compiler underneath it can move.
 solc = "0.8.30"
 
-# London: the oldest target the code needs (CHAINID is Istanbul, nothing later is used),
-# and the newest fork the besu-sandbox chart's genesis can enable. Raising it would emit
-# PUSH0 (Shanghai) and refuse to run on that chart for a gas saving nobody would notice.
+# London is the oldest target the code needs (CHAINID is Istanbul, nothing later is
+# used) and the newest fork the besu-sandbox chart's genesis can enable. Anything newer
+# emits PUSH0 (Shanghai) and won't run on that chart, for a gas saving nobody would notice.
 evm_version = "london"
 
-# Invariants: a fast default for every `forge test`, a deep profile for when it matters.
+# Invariants: a quick default so every `forge test` stays fast, and a deep profile.
 # `FOUNDRY_PROFILE=deep forge test --match-contract SystemInvariants` runs 128,000 calls
-# per invariant, which is where the numbers in test/Invariants.t.sol were checked.
+# per invariant; that's the setting the numbers in test/Invariants.t.sol were checked at.
 [invariant]
 runs = 32
 depth = 128

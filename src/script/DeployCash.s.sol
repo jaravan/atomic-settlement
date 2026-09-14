@@ -65,7 +65,7 @@ contract DeployCash is Script {
         _assertFinalState(token, cfg, bootstrapAdmin);
     }
 
-    /// @dev Checked before anything is deployed, so a bad plan costs nothing.
+    /// @dev Checked before anything is deployed, so a bad config fails without spending gas.
     function _validate(Config memory cfg) private view {
         if (
             address(cfg.registry) == address(0) || cfg.admin == address(0) || cfg.issuer == address(0)
@@ -76,12 +76,12 @@ contract DeployCash is Script {
 
         if (address(cfg.registry).code.length == 0) revert RegistryHasNoCode(address(cfg.registry));
 
-        // The whole point of this script (section 2).
+        // The main thing this script exists to check (section 2).
         if (cfg.issuer == cfg.complianceOfficer) revert RolesNotSeparated(cfg.issuer);
     }
 
-    /// @dev Re-checked after wiring, so a mistake in this script fails the deploy rather than
-    ///      shipping a token whose roles are not where the plan said.
+    /// @dev Re-checked after wiring, so a bug in this script fails the deploy instead of
+    ///      shipping a token with roles in the wrong place.
     function _assertFinalState(TokenizedCash token, Config memory cfg, address bootstrapAdmin) private view {
         bytes32 adminRole = token.DEFAULT_ADMIN_ROLE();
 

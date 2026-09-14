@@ -109,7 +109,7 @@ contract DeployAsset is Script {
         if (!isValidIsin(cfg.isin)) revert InvalidIsin(cfg.isin);
         if (address(cfg.registry).code.length == 0) revert RegistryHasNoCode(address(cfg.registry));
 
-        // The whole point of this script (section 2).
+        // The main thing this script exists to check (section 2).
         if (cfg.issuer == cfg.complianceOfficer) revert RolesNotSeparated(cfg.issuer);
     }
 

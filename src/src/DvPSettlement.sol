@@ -13,8 +13,8 @@ contract DvPSettlement {
     // Trades (section 3)
     // ---------------------------------------------------------------------------------
 
-    /// @notice Where a trade is in its life. Expiry is not a status: it is computed from the
-    ///         deadline, so an expired trade is dead without anyone paying to kill it.
+    /// @notice Where a trade is in its lifecycle. Expiry is not a status; it's computed from
+    ///         the deadline, so nobody has to send a transaction to expire a trade.
     enum Status {
         NONE,
         PROPOSED,
@@ -124,8 +124,8 @@ contract DvPSettlement {
         uint256 assetAmount
     );
 
-    /// @notice The seller withdrew its instruction. No reason: a party withdrawing its own
-    ///         offer owes the log no justification (section 8).
+    /// @notice The seller withdrew its instruction. No reason code: withdrawing your own
+    ///         proposal isn't a compliance action (section 8).
     event TradeCancelled(uint256 indexed tradeId, address indexed seller, address indexed buyer);
 
     // ---------------------------------------------------------------------------------
@@ -206,8 +206,8 @@ contract DvPSettlement {
 
     /// @notice The hash a buyer passes to `settle`, computed from the buyer's own record of
     ///         the trade -- never from reading the proposal back and hashing that.
-    /// @dev Bound to one trade on one deployment on one chain, so a hash is worthless
-    ///      against any trade but the one it was made for.
+    /// @dev Includes trade id, contract address and chain id, so a hash only ever matches
+    ///      the one trade it was computed for.
     function hashTerms(uint256 tradeId, address seller, Terms memory terms) public view returns (bytes32) {
         return keccak256(
             abi.encode(
@@ -254,8 +254,8 @@ contract DvPSettlement {
         );
     }
 
-    /// @dev Everything settle checks before it touches a balance, in the order canSettle
-    ///      mirrors so the view names the cause the transaction would. Returns the two legs.
+    /// @dev Everything settle checks before it touches a balance, in the same order canSettle
+    ///      uses so the view reports the same cause the transaction would. Returns both legs.
     function _checkSettle(uint256 tradeId, Trade storage trade, bytes32 termsHash, address caller)
         private
         view
@@ -280,8 +280,8 @@ contract DvPSettlement {
     // ---------------------------------------------------------------------------------
 
     /// @notice Whether `settle` would succeed right now, were the named buyer to call it.
-    /// @dev Makes no registry call of its own: each token answers for its leg through its
-    ///      own preview, so there is no second copy of the compliance rules here.
+    /// @dev Makes no registry call of its own. Each token answers for its leg through its
+    ///      own preview, so there's no second copy of the compliance rules here.
     /// @return ok True if it would go through.
     /// @return reason The selector of the error it would revert with, or 0 when `ok`.
     function canSettle(uint256 tradeId, bytes32 termsHash) external view returns (bool ok, bytes4 reason) {
@@ -293,8 +293,8 @@ contract DvPSettlement {
     }
 
     /// @notice Reverts with the error a real `settle` would, assuming the buyer calls it.
-    /// @dev Machinery for `canSettle`: this contract's own checks, then the cash leg, then
-    ///      the asset leg -- the order settle would hit them.
+    /// @dev Backs `canSettle`: this contract's own checks, then the cash leg, then the asset
+    ///      leg, in the order settle would hit them.
     function previewSettle(uint256 tradeId, bytes32 termsHash) external view {
         Trade storage trade = _trades[tradeId];
         (ICashLeg cash, IAssetLeg asset) = _checkSettle(tradeId, trade, termsHash, trade.buyer);

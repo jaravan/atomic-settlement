@@ -20,9 +20,8 @@ jobs:
         with:
           submodules: recursive
 
-      # Pinned to the version the repository is developed and formatted against. The
-      # action defaults to nightly, which can fail `forge fmt --check` on formatting
-      # differences alone.
+      # Pinned to the version the repo is developed and formatted with. The action
+      # defaults to nightly, and a newer fmt can fail `forge fmt --check` on its own.
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
@@ -46,3 +45,21 @@ jobs:
         run: |
           forge test -vvv
         id: test
+
+      # Pinned to the version the findings were triaged with. src/slither.config.json
+      # excludes four detectors that fire on things we do on purpose:
+      #   arbitrary-send-erc20  settle() moves both parties' tokens; that's the point
+      #   reentrancy-events     TradeSettled is emitted after the two transferFrom calls;
+      #                         the status write before them is the guard (settlement §7)
+      #   timestamp             deadlines and the UTC-day window are timestamp
+      #                         comparisons by design (settlement §4, cash §4)
+      #   incorrect-equality    the day-number equality in the daily accumulator (cash §4)
+      # Anything else at medium or above fails the run.
+      - name: Install Slither
+        run: |
+          pipx install slither-analyzer==0.11.5
+
+      - name: Run Slither
+        run: |
+          slither .
+        id: slither

@@ -97,8 +97,8 @@ contract TokenizedCash is ERC20, AccessControl, Pausable {
     error DailyLimitTooLarge(uint256 limit);
 
     /// @notice `burnFrom` was called on an account that has not been frozen first.
-    /// @dev The frozen precondition is the whole control: destruction can only follow a
-    ///      public, attributed, reversible act by a different role (section 7).
+    /// @dev The frozen precondition is the control: a burn can only follow a public,
+    ///      attributed, reversible freeze by a different role (section 7).
     error AccountNotFrozen(address account);
 
     /// @notice The party directing the transfer is sanctioned.
@@ -152,7 +152,7 @@ contract TokenizedCash is ERC20, AccessControl, Pausable {
     }
 
     /// @inheritdoc ERC20
-    /// @dev Six, not two or eighteen (section 8).
+    /// @dev Six, same as USDC/EURC. Reasoning in section 8.
     function decimals() public pure override returns (uint8) {
         return 6;
     }
@@ -246,8 +246,8 @@ contract TokenizedCash is ERC20, AccessControl, Pausable {
     }
 
     /// @notice Reverts with the error a real `transfer` would.
-    /// @dev Machinery for `canTransfer`. Running the predicate rather than reimplementing it
-    ///      is what makes `reason` correct by construction rather than by convention.
+    /// @dev Backs `canTransfer`. It runs the real predicate rather than a copy of it, so
+    ///      `reason` can't drift from what the transfer would actually revert with.
     function previewTransfer(address from, address to, uint256 value) external view {
         _checkTransfer(from, to, value);
     }
@@ -324,8 +324,8 @@ contract TokenizedCash is ERC20, AccessControl, Pausable {
     }
 
     /// @notice Take from a holder that has not consented. Reverts unless already frozen.
-    /// @dev It names no recipient, so it can only destroy: total supply falls, which makes a
-    ///      seizure visible in supply reconciliation rather than reading as a payment.
+    /// @dev No recipient parameter, so it can only destroy. Total supply falls, so a seizure
+    ///      shows up in supply reconciliation instead of looking like a payment.
     function burnFrom(address account, uint256 value, bytes32 reason) external onlyRole(ISSUER_ROLE) {
         if (!frozen[account]) revert AccountNotFrozen(account);
         _burn(account, value);
@@ -370,8 +370,8 @@ contract TokenizedCash is ERC20, AccessControl, Pausable {
     }
 
     /// @notice Set both caps for a tier. Either may be NO_LIMIT.
-    /// @dev Takes a Tier, never an address: the entire policy is three entries, readable in
-    ///      full, where per-address overrides would scatter it across holders (section 4).
+    /// @dev Takes a Tier, not an address: the whole policy is three entries and can be read
+    ///      in full. Per-address overrides would scatter it across holders (section 4).
     function setTierLimits(Tier tier, uint256 perTransaction, uint256 perDay) external onlyRole(DEFAULT_ADMIN_ROLE) {
         if (tier == Tier.UNSET) revert CannotConfigureUnsetTier();
         if (perDay != NO_LIMIT && perDay > type(uint216).max) revert DailyLimitTooLarge(perDay);

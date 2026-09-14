@@ -1,7 +1,7 @@
 # Integration notes
 
-What a client has to get right that the contracts cannot enforce. The design documents
-give the reasons; this document gives the rules. Section references are to
+Things a client has to get right that the contracts can't enforce. The design docs have
+the reasoning; this one just has the rules. Section references are to
 [design-settlement.md](design-settlement.md) unless marked otherwise.
 
 ---
@@ -41,9 +41,9 @@ SELLER                                        BUYER
                                               7. dvp.settle(tradeId, termsHash)
 ```
 
-- The seller's allowance stands open from step 1 until settle, cancel or expiry. One
-  holding can back two proposals, and the second to settle reverts, so size the allowance
-  to what is on offer (section 3).
+- The seller's allowance stays open from step 1 until settle, cancel or expiry. One
+  holding can back two proposals and the second to settle will revert, so size the
+  allowance to what's actually on offer (section 3).
 - The buyer's window is steps 6 and 7, two transactions back to back (section 3).
 
 ```solidity
@@ -66,8 +66,8 @@ struct Terms {
 
 ## 4. The terms hash
 
-`settle` requires the buyer to state the terms it agreed, as a hash. Compute it from your
-own trade record (section 2):
+`settle` requires the buyer to state the terms it agreed to, as a hash. Compute it from
+your own trade record (section 2):
 
 ```
 termsHash = keccak256(abi.encode(
@@ -86,9 +86,10 @@ termsHash = keccak256(abi.encode(
 ))
 ```
 
-`hashTerms(tradeId, seller, terms)` on the contract is a reference implementation for
-verifying yours during development. Do not read the proposal back with `trades(tradeId)`
-and hash that in production: it always matches and asserts nothing.
+`hashTerms(tradeId, seller, terms)` on the contract is a reference implementation you can
+check yours against during development. Don't read the proposal back with
+`trades(tradeId)` and hash that in production — it will always match, so it checks
+nothing.
 
 ---
 
@@ -99,8 +100,8 @@ function canSettle(uint256 tradeId, bytes32 termsHash) external view returns (bo
 ```
 
 `reason` is the selector of the error `settle` would revert with. Checks run in this
-order and stop at the first failure (section 5). Selectors are `bytes4(keccak256(signature))`
-and can be regenerated with `cast sig`.
+order and stop at the first failure (section 5). Selectors are
+`bytes4(keccak256(signature))`; `cast sig` will regenerate them.
 
 | Order | Source | Selector | Error | Meaning |
 | --- | --- | --- | --- | --- |
@@ -121,18 +122,18 @@ and can be regenerated with `cast sig`.
 | 7 | asset leg | as above, minus tier and limit errors | | seller side |
 
 **Shared selectors.** `SenderFrozen`, `NotApproved`, `SpenderSanctioned`, `EnforcedPause`
-and the ERC-20 errors have the same signature on both tokens, so the same selector, and
-`canSettle` does not say which leg raised it. The cash leg is checked first: `SenderFrozen`
-from it means the buyer, from the asset leg the seller; `NotApproved` from the cash leg
-can be either party, since it checks both. To attribute an error to a party, ask the legs
-directly:
+and the ERC-20 errors have the same signature on both tokens, hence the same selector,
+and `canSettle` doesn't say which leg raised it. The cash leg is checked first, so
+`SenderFrozen` from it means the buyer, and from the asset leg the seller. `NotApproved`
+from the cash leg can be either party since it checks both. If you need to know which
+party, ask the legs directly:
 
 ```solidity
 cash.canTransferFrom(dvp, buyer, seller, cashAmount)
 asset.canTransferFrom(dvp, seller, buyer, assetAmount)
 ```
 
-`NotBuyer` is never returned: the view assumes the named buyer will call.
+`NotBuyer` is never returned; the view assumes the named buyer is the one calling.
 
 ---
 
@@ -146,9 +147,9 @@ asset.canTransferFrom(dvp, seller, buyer, assetAmount)
 
 `tradeId`, `seller` and `buyer` are indexed on all three.
 
-Nothing is emitted on expiry or on a failed settle (section 8). Compute expiry from
-`TradeProposed.deadline` and treat a reverted `settle` as a fail. `trades(id).status` stays
-`PROPOSED` after expiry.
+Nothing is emitted on expiry or on a failed settle (section 8). Work out expiry from
+`TradeProposed.deadline` and treat a reverted `settle` as a fail. `trades(id).status`
+stays `PROPOSED` after expiry.
 
 ---
 
@@ -160,7 +161,7 @@ Nothing is emitted on expiry or on a failed settle (section 8). Compute expiry f
 | `AssetToken` | 0 | `100` |
 
 `currency` is a left-aligned `bytes3` (`"EUR"` is `0x455552`) and `isin` a left-aligned
-`bytes12`. Pass them as bytes, not numbers.
+`bytes12`. Pass them as bytes, not as numbers.
 
 ---
 
