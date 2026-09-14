@@ -106,7 +106,7 @@ git clone --recurse-submodules https://github.com/jaravan/atomic-settlement
 cd atomic-settlement/src
 
 forge build
-forge test                                   # 338 tests, about a second
+forge test                                   # 339 tests, about a second
 forge test --match-path test/Gas.t.sol -vv   # the measurements behind each Gas section
 forge coverage --no-match-coverage "test|script"
 

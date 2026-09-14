@@ -784,6 +784,21 @@ contract AssetTokenTest is Test {
         assertEq(bond.totalSupply(), ISSUE_SIZE, "nothing burned");
     }
 
+    /// @dev The mirror image: super._update would treat a zero sender as a mint. freeze has
+    ///      no zero-address guard, so the guard has to be here.
+    function test_forceTransfer_refusesZeroSender() public {
+        (address issuer, address officer) = _seizureReady();
+
+        vm.prank(officer);
+        bond.freeze(address(0), REASON);
+
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InvalidSender.selector, address(0)));
+        vm.prank(issuer);
+        bond.forceTransfer(address(0), NEW_OWNER, 100, REASON);
+
+        assertEq(bond.totalSupply(), ISSUE_SIZE, "nothing minted");
+    }
+
     /// @dev The bypass is sender-side only: isApproved(to) still runs.
     function test_forceTransfer_recipientMustStillBeApproved() public {
         (address issuer,) = _seizureReady();

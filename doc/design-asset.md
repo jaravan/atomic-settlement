@@ -262,6 +262,7 @@ function forceTransfer(address from, address to, uint256 value, bytes32 reason)
     external onlyRole(ISSUER_ROLE) whenNotPaused
 {
     if (!frozen[from]) revert AccountNotFrozen(from);   // the first key must have acted
+    if (from == address(0)) revert ERC20InvalidSender(address(0));
     if (to == address(0)) revert ERC20InvalidReceiver(address(0));
     _checkRecipient(to);                                 // isApproved(to): the one check kept
     super._update(from, to, value);                      // ERC20's own: this contract's override is not run
@@ -287,8 +288,10 @@ issuer, the reason and both parties, instead of a supply change.
 override, where all the compliance checks live, isn't on the call path. The sender-side
 checks get skipped without any flag or extra state. The one rule that still applies,
 `isApproved(to)`, goes through the same private function `_update` uses, so there's one
-copy of it. `super._update` would burn if `to` were zero, which is exactly what this
-section exists to prevent, so the zero-recipient guard is explicit.
+copy of it. `super._update` would mint if `from` were zero and burn if `to` were zero,
+and both change supply, which is exactly what this section exists to prevent. So both
+zero-address guards are explicit; nothing stops an officer freezing `address(0)`, so the
+sender-side one can't be left to the freeze check.
 
 ### What this costs
 
@@ -409,12 +412,12 @@ and one fewer storage read/write.
 | `transferFrom`        | 47,736 | 12,633 |
 | `mint`                | 36,376 |  9,273 |
 | `burn`                |      - |  6,749 |
-| `forceTransfer`       | 33,456 |      - |
+| `forceTransfer`       | 33,491 |      - |
 
 - **Dropping `tierOf` is worth 8,294 cold.** Asset `transfer` against cash `NO_LIMIT` is
   the cleanest comparison: identical paths except for that one call, and the gap is one
   registry round trip through the proxy.
-- **A forced transfer is cheaper than an ordinary one** (33,456 against 41,118). It skips
+- **A forced transfer is cheaper than an ordinary one** (33,491 against 41,118). It skips
   `isApproved(from)` and the freeze read, since this contract's `_update` override isn't
   on its call path (section 8); the recipient check is the only registry call left.
 

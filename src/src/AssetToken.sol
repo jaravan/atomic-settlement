@@ -291,7 +291,10 @@ contract AssetToken is ERC20, AccessControl, Pausable {
         whenNotPaused
     {
         if (!frozen[from]) revert AccountNotFrozen(from);
-        if (to == address(0)) revert ERC20InvalidReceiver(address(0)); // would be a burn
+        // super._update would mint from a zero sender and burn to a zero recipient. Both
+        // change supply, which is what this function exists not to do (section 8).
+        if (from == address(0)) revert ERC20InvalidSender(address(0));
+        if (to == address(0)) revert ERC20InvalidReceiver(address(0));
         _checkRecipient(to);
 
         // super._update resolves to ERC20._update, so the sender-side checks in this
